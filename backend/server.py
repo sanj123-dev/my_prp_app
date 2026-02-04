@@ -136,8 +136,17 @@ JSON:"""
         user_message = UserMessage(text=prompt)
         response = await chat.send_message(user_message)
         
-        # Parse JSON from response
-        result = json.loads(response.strip())
+        # Clean markdown wrappers and parse JSON
+        cleaned_response = response.strip()
+        # Remove markdown code blocks if present
+        cleaned_response = cleaned_response.replace('```json', '').replace('```', '').strip()
+        
+        # Handle empty response
+        if not cleaned_response:
+            logging.warning("Empty response from AI categorization")
+            return {"category": "Other", "sentiment": "neutral"}
+        
+        result = json.loads(cleaned_response)
         return result
     except Exception as e:
         logging.error(f"AI categorization error: {e}")
