@@ -196,3 +196,122 @@ class LearnHomeResponse(BaseModel):
     pathways: List[LearnPathwaySummary]
     challenge: ChallengeResponse
     tools: List[LearnTool]
+
+
+class SimulationAvatarOption(BaseModel):
+    id: str
+    name: str
+    title: str
+    emoji: str
+    style: str
+
+
+class SimulationRoom(BaseModel):
+    id: str
+    code: str
+    name: str
+    member_count: int
+    is_public: bool
+    created_by: str
+
+
+class SimulationAsset(BaseModel):
+    symbol: str
+    name: str
+    category: str
+    current_price: float
+    price_change_pct: float
+    day_high: float
+    day_low: float
+    volume: float
+
+
+class SimulationPosition(BaseModel):
+    symbol: str
+    name: str
+    category: str
+    quantity: float
+    average_buy_price: float
+    current_price: float
+    market_value: float
+    unrealized_pnl: float
+    unrealized_pnl_pct: float
+
+
+class SimulationTrade(BaseModel):
+    id: str
+    user_id: str
+    symbol: str
+    side: str
+    quantity: float
+    price: float
+    notional: float
+    fee: float
+    executed_at: datetime
+
+
+class SimulationPortfolioSnapshot(BaseModel):
+    starting_cash: float
+    cash_balance: float
+    invested_value: float
+    total_equity: float
+    realized_pnl: float
+    unrealized_pnl: float
+    total_pnl: float
+    total_pnl_pct: float
+    positions: List[SimulationPosition]
+    recent_trades: List[SimulationTrade]
+
+
+class SimulationPlayerStanding(BaseModel):
+    rank: int
+    user_id: str
+    user_name: str
+    avatar_id: str
+    total_equity: float
+    total_pnl_pct: float
+    cash_balance: float
+
+
+class SimulationFeedPost(BaseModel):
+    id: str
+    user_id: str
+    user_name: str
+    avatar_id: str
+    room_code: str
+    message: str
+    total_equity: float
+    total_pnl_pct: float
+    created_at: datetime
+
+
+class SimulationHomeResponse(BaseModel):
+    user_id: str
+    active_avatar_id: str
+    avatar_options: List[SimulationAvatarOption]
+    active_room: SimulationRoom
+    rooms: List[SimulationRoom]
+    market: List[SimulationAsset]
+    portfolio: SimulationPortfolioSnapshot
+    leaderboard: List[SimulationPlayerStanding]
+    feed: List[SimulationFeedPost]
+
+
+class SimulationAvatarSelectRequest(BaseModel):
+    avatar_id: str
+
+
+class SimulationRoomJoinRequest(BaseModel):
+    room_code: Optional[str] = None
+    room_name: Optional[str] = None
+    is_public: bool = True
+
+
+class SimulationTradeRequest(BaseModel):
+    symbol: str
+    side: str
+    quantity: float = Field(..., gt=0)
+
+
+class SimulationFeedShareRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=280)

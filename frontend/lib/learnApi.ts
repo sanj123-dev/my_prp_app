@@ -165,6 +165,105 @@ export type MissionClaimResult = {
   profile: PlayerProfile;
 };
 
+export type SimulationAvatarOption = {
+  id: string;
+  name: string;
+  title: string;
+  emoji: string;
+  style: string;
+};
+
+export type SimulationRoom = {
+  id: string;
+  code: string;
+  name: string;
+  member_count: number;
+  is_public: boolean;
+  created_by: string;
+};
+
+export type SimulationAsset = {
+  symbol: string;
+  name: string;
+  category: string;
+  current_price: number;
+  price_change_pct: number;
+  day_high: number;
+  day_low: number;
+  volume: number;
+};
+
+export type SimulationPosition = {
+  symbol: string;
+  name: string;
+  category: string;
+  quantity: number;
+  average_buy_price: number;
+  current_price: number;
+  market_value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+};
+
+export type SimulationTrade = {
+  id: string;
+  user_id: string;
+  symbol: string;
+  side: 'buy' | 'sell';
+  quantity: number;
+  price: number;
+  notional: number;
+  fee: number;
+  executed_at: string;
+};
+
+export type SimulationPortfolioSnapshot = {
+  starting_cash: number;
+  cash_balance: number;
+  invested_value: number;
+  total_equity: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  positions: SimulationPosition[];
+  recent_trades: SimulationTrade[];
+};
+
+export type SimulationPlayerStanding = {
+  rank: number;
+  user_id: string;
+  user_name: string;
+  avatar_id: string;
+  total_equity: number;
+  total_pnl_pct: number;
+  cash_balance: number;
+};
+
+export type SimulationFeedPost = {
+  id: string;
+  user_id: string;
+  user_name: string;
+  avatar_id: string;
+  room_code: string;
+  message: string;
+  total_equity: number;
+  total_pnl_pct: number;
+  created_at: string;
+};
+
+export type SimulationHome = {
+  user_id: string;
+  active_avatar_id: string;
+  avatar_options: SimulationAvatarOption[];
+  active_room: SimulationRoom;
+  rooms: SimulationRoom[];
+  market: SimulationAsset[];
+  portfolio: SimulationPortfolioSnapshot;
+  leaderboard: SimulationPlayerStanding[];
+  feed: SimulationFeedPost[];
+};
+
 const requireBackendUrl = () => {
   if (!EXPO_PUBLIC_BACKEND_URL) {
     throw new Error('Backend URL is not configured');
@@ -369,5 +468,121 @@ export const savePitfall = async (
     return response.data;
   } catch (error) {
     throw new Error(buildMessage(error, 'Unable to save pitfall'));
+  }
+};
+
+export const getSimulationHome = async (userId: string): Promise<SimulationHome> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.get<SimulationHome>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/simulation/${userId}/home`
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to load simulation home'));
+  }
+};
+
+export const chooseSimulationAvatar = async (
+  userId: string,
+  avatarId: string
+): Promise<SimulationHome> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.put<SimulationHome>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/simulation/${userId}/avatar`,
+      { avatar_id: avatarId }
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to choose avatar'));
+  }
+};
+
+export const joinSimulationRoom = async (
+  userId: string,
+  payload: { room_code?: string; room_name?: string; is_public?: boolean }
+): Promise<SimulationRoom> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.post<SimulationRoom>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/simulation/${userId}/rooms`,
+      payload
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to join room'));
+  }
+};
+
+export const executeSimulationTrade = async (
+  userId: string,
+  payload: { symbol: string; side: 'buy' | 'sell'; quantity: number }
+): Promise<SimulationTrade> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.post<SimulationTrade>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/simulation/${userId}/trade`,
+      payload
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to execute trade'));
+  }
+};
+
+export const getSimulationPortfolio = async (userId: string): Promise<SimulationPortfolioSnapshot> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.get<SimulationPortfolioSnapshot>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/simulation/${userId}/portfolio`
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to load portfolio'));
+  }
+};
+
+export const getSimulationLeaderboard = async (userId: string): Promise<SimulationPlayerStanding[]> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.get<SimulationPlayerStanding[]>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/simulation/${userId}/leaderboard`
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to load leaderboard'));
+  }
+};
+
+export const shareSimulationUpdate = async (
+  userId: string,
+  message: string
+): Promise<SimulationFeedPost> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.post<SimulationFeedPost>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/simulation/${userId}/share`,
+      { message }
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to share update'));
+  }
+};
+
+export const getSimulationFeed = async (
+  userId: string,
+  limit = 20
+): Promise<SimulationFeedPost[]> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.get<SimulationFeedPost[]>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/simulation/${userId}/feed`,
+      { params: { limit } }
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to load simulation feed'));
   }
 };

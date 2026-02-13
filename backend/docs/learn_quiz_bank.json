@@ -1,0 +1,142 @@
+[
+  {
+    "id": "quiz-diversification",
+    "question": "Your first investing skill should be:",
+    "options": [
+      "Put all money in one fast-growing stock",
+      "Diversify across assets",
+      "Trade daily for quick gains"
+    ],
+    "correct_index": 1
+  },
+  {
+    "id": "quiz-emergency-fund",
+    "question": "Best first step before risky investing:",
+    "options": [
+      "Build an emergency fund",
+      "Buy options contracts",
+      "Take a personal loan to invest"
+    ],
+    "correct_index": 0
+  },
+  {
+    "id": "quiz-budgeting",
+    "question": "A realistic budget should be reviewed:",
+    "options": [
+      "Once every 5 years",
+      "Only when broke",
+      "Weekly or monthly"
+    ],
+    "correct_index": 2
+  },
+  {
+    "id": "quiz-inflation",
+    "question": "Inflation mainly means:",
+    "options": [
+      "Prices rise over time and money buys less",
+      "Bank balance always increases in real value",
+      "Interest rates stop changing"
+    ],
+    "correct_index": 0
+  },
+  {
+    "id": "quiz-credit-utilization",
+    "question": "Healthy credit card utilization is usually:",
+    "options": [
+      "Above 90%",
+      "Under 30%",
+      "Exactly 75%"
+    ],
+    "correct_index": 1
+  },
+  {
+    "id": "quiz-emi-priority",
+    "question": "When paying down debt, you should usually prioritize:",
+    "options": [
+      "Highest interest debt first",
+      "Newest loan first always",
+      "Smallest loan only, no exceptions"
+    ],
+    "correct_index": 0
+  },
+  {
+    "id": "quiz-emergency-size",
+    "question": "A practical emergency fund target is:",
+    "options": [
+      "1 day of expenses",
+      "3-6 months of essential expenses",
+      "Only one month salary for life"
+    ],
+    "correct_index": 1
+  },
+  {
+    "id": "quiz-risk-return",
+    "question": "In investing, higher potential return generally comes with:",
+    "options": [
+      "Lower risk always",
+      "No risk if diversified",
+      "Higher risk/volatility"
+    ],
+    "correct_index": 2
+  },
+  {
+    "id": "quiz-sip",
+    "question": "A SIP strategy helps mostly by:",
+    "options": [
+      "Timing every market top",
+      "Investing consistently over time",
+      "Guaranteeing fixed profits"
+    ],
+    "correct_index": 1
+  },
+  {
+    "id": "quiz-net-worth",
+    "question": "Net worth is calculated as:",
+    "options": [
+      "Income - tax only",
+      "Assets - liabilities",
+      "Expenses - savings"
+    ],
+    "correct_index": 1
+  },
+  {
+    "id": "quiz-insurance",
+    "question": "Insurance is mainly used to:",
+    "options": [
+      "Transfer major financial risk",
+      "Double investment returns",
+      "Replace emergency funds completely"
+    ],
+    "correct_index": 0
+  },
+  {
+    "id": "quiz-goal-investing",
+    "question": "Best way to invest for goals:",
+    "options": [
+      "Match risk and time horizon to the goal",
+      "Use one product for every goal",
+      "Ignore timeline and chase highest returns"
+    ],
+    "correct_index": 0
+  },
+  {
+    "id": "quiz-tax-planning",
+    "question": "Good tax planning should be:",
+    "options": [
+      "Done after the financial year ends",
+      "Integrated with your yearly financial plan",
+      "Avoided because taxes are fixed"
+    ],
+    "correct_index": 1
+  },
+  {
+    "id": "quiz-fomo",
+    "question": "FOMO investing is dangerous because it:",
+    "options": [
+      "Encourages decisions without research",
+      "Guarantees diversified portfolios",
+      "Reduces emotional bias"
+    ],
+    "correct_index": 0
+  }
+]

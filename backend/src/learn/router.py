@@ -16,6 +16,16 @@ from .schemas import (
     PitfallSaveResponse,
     QuizAnswerRequest,
     QuizAnswerResponse,
+    SimulationAvatarSelectRequest,
+    SimulationFeedPost,
+    SimulationFeedShareRequest,
+    SimulationHomeResponse,
+    SimulationPlayerStanding,
+    SimulationPortfolioSnapshot,
+    SimulationRoom,
+    SimulationRoomJoinRequest,
+    SimulationTradeRequest,
+    SimulationTrade,
     WatchlistCreateRequest,
     WatchlistItem,
     WatchlistUpdateRequest,
@@ -37,6 +47,14 @@ from .service import (
     toggle_challenge_check_in,
     update_pathway_progress,
     update_watchlist_item,
+    choose_simulation_avatar,
+    execute_simulation_trade,
+    get_simulation_feed,
+    get_simulation_home,
+    get_simulation_leaderboard,
+    get_simulation_portfolio,
+    join_simulation_room,
+    share_simulation_update,
 )
 
 
@@ -139,6 +157,58 @@ def create_learn_router(db_provider) -> APIRouter:
         user_id: str, pitfall_id: str, saved: bool = True, db=Depends(get_db)
     ):
         return await save_pitfall(db, user_id, pitfall_id, saved)
+
+    @learn_router.get("/simulation/{user_id}/home", response_model=SimulationHomeResponse)
+    async def get_user_simulation_home(user_id: str, db=Depends(get_db)):
+        return await get_simulation_home(db, user_id)
+
+    @learn_router.put("/simulation/{user_id}/avatar", response_model=SimulationHomeResponse)
+    async def put_simulation_avatar(
+        user_id: str, payload: SimulationAvatarSelectRequest, db=Depends(get_db)
+    ):
+        return await choose_simulation_avatar(db, user_id, payload.avatar_id)
+
+    @learn_router.post("/simulation/{user_id}/rooms", response_model=SimulationRoom)
+    async def post_simulation_room(
+        user_id: str, payload: SimulationRoomJoinRequest, db=Depends(get_db)
+    ):
+        return await join_simulation_room(
+            db,
+            user_id=user_id,
+            room_code=payload.room_code,
+            room_name=payload.room_name,
+            is_public=payload.is_public,
+        )
+
+    @learn_router.post("/simulation/{user_id}/trade", response_model=SimulationTrade)
+    async def post_simulation_trade(
+        user_id: str, payload: SimulationTradeRequest, db=Depends(get_db)
+    ):
+        return await execute_simulation_trade(
+            db,
+            user_id=user_id,
+            symbol=payload.symbol,
+            side=payload.side,
+            quantity=payload.quantity,
+        )
+
+    @learn_router.get("/simulation/{user_id}/portfolio", response_model=SimulationPortfolioSnapshot)
+    async def get_user_simulation_portfolio(user_id: str, db=Depends(get_db)):
+        return await get_simulation_portfolio(db, user_id)
+
+    @learn_router.get("/simulation/{user_id}/leaderboard", response_model=List[SimulationPlayerStanding])
+    async def get_user_simulation_leaderboard(user_id: str, db=Depends(get_db)):
+        return await get_simulation_leaderboard(db, user_id)
+
+    @learn_router.post("/simulation/{user_id}/share", response_model=SimulationFeedPost)
+    async def post_simulation_share(
+        user_id: str, payload: SimulationFeedShareRequest, db=Depends(get_db)
+    ):
+        return await share_simulation_update(db, user_id, payload.message)
+
+    @learn_router.get("/simulation/{user_id}/feed", response_model=List[SimulationFeedPost])
+    async def get_user_simulation_feed(user_id: str, limit: int = Query(20, ge=1, le=100), db=Depends(get_db)):
+        return await get_simulation_feed(db, user_id, limit)
 
     return learn_router
 
