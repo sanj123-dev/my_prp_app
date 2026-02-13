@@ -12,7 +12,9 @@
                              "supportsTablet":  true,
                              "infoPlist":  {
                                                "NSContactsUsageDescription":  "Read transaction messages to track spending",
-                                               "NSSMSUsageDescription":  "Read SMS to auto-categorize transactions"
+                                               "NSSMSUsageDescription":  "Read SMS to auto-categorize transactions",
+                                               "NSMicrophoneUsageDescription": "Allow microphone access to talk with your virtual assistant",
+                                               "NSSpeechRecognitionUsageDescription": "Allow speech recognition so your assistant can understand your voice"
                                            }
                          },
                  "android":  {
@@ -25,7 +27,8 @@
                                                      "READ_SMS",
                                                      "RECEIVE_SMS",
                                                      "READ_SMS",
-                                                     "RECEIVE_SMS"
+                                                     "RECEIVE_SMS",
+                                                     "RECORD_AUDIO"
                                                  ],
                                  "package":  "com.anonymous.frontend"
                              },
@@ -36,6 +39,7 @@
                          },
                  "plugins":  [
                                  "expo-router",
+                                 "expo-speech-recognition",
                                  [
                                      "expo-splash-screen",
                                      {

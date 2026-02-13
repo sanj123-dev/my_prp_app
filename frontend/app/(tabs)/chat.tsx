@@ -1,19 +1,28 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
+  ActivityIndicator,
+  Alert,
+  Animated,
+  KeyboardAvoidingView,
+  Linking,
+  Modal,
+  Platform,
   ScrollView,
+  StyleSheet,
+  Text,
   TextInput,
   TouchableOpacity,
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
+import * as Speech from 'expo-speech';
 import { format } from 'date-fns';
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
@@ -25,17 +34,157 @@ interface Message {
   timestamp: string;
 }
 
+type AssistantLanguage = {
+  id: string;
+  label: string;
+  locale: string;
+  promptName: string;
+};
+
+const ASSISTANT_LANGUAGES: AssistantLanguage[] = [
+  { id: 'english', label: 'English', locale: 'en-IN', promptName: 'English' },
+  { id: 'hindi', label: 'Hindi', locale: 'hi-IN', promptName: 'Hindi' },
+  { id: 'spanish', label: 'Spanish', locale: 'es-ES', promptName: 'Spanish' },
+  { id: 'french', label: 'French', locale: 'fr-FR', promptName: 'French' },
+];
+
 export default function Chat() {
   const [userId, setUserId] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+
+  const [assistantVisible, setAssistantVisible] = useState(false);
+  const [assistantListening, setAssistantListening] = useState(false);
+  const [assistantSpeaking, setAssistantSpeaking] = useState(false);
+  const [assistantTranscript, setAssistantTranscript] = useState('');
+  const [assistantStatus, setAssistantStatus] = useState(
+    'Tap the mic and ask your question.'
+  );
+  const [selectedLanguage, setSelectedLanguage] = useState<AssistantLanguage>(
+    ASSISTANT_LANGUAGES[0]
+  );
+
   const scrollViewRef = useRef<ScrollView>(null);
+  const pulse = useRef(new Animated.Value(1)).current;
+  const transcriptRef = useRef('');
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isVoiceSubmittingRef = useRef(false);
+
+  const getTranscriptFromEvent = (event: any): string => {
+    const firstResult = event?.results?.[0];
+    if (typeof firstResult === 'string') return firstResult;
+    if (firstResult?.transcript) return String(firstResult.transcript);
+    if (Array.isArray(firstResult)) {
+      const alt = firstResult[0];
+      if (typeof alt === 'string') return alt;
+      if (alt?.transcript) return String(alt.transcript);
+    }
+    if (typeof event?.transcript === 'string') return event.transcript;
+    if (Array.isArray(event?.value) && typeof event.value[0] === 'string') {
+      return event.value[0];
+    }
+    return '';
+  };
+
+  const speakText = async (text: string, locale?: string) => {
+    const cleaned = (text || '').trim();
+    if (!cleaned) return;
+
+    const attemptSpeak = (language?: string) =>
+      new Promise<boolean>((resolve) => {
+        Speech.speak(cleaned, {
+          language,
+          rate: 0.95,
+          pitch: 1.0,
+          volume: 1.0,
+          onDone: () => resolve(true),
+          onStopped: () => resolve(true),
+          onError: () => resolve(false),
+        });
+      });
+
+    setAssistantSpeaking(true);
+    setAssistantStatus('Speaking...');
+    await Speech.stop();
+
+    let ok = await attemptSpeak(locale);
+    if (!ok) {
+      ok = await attemptSpeak(undefined);
+    }
+
+    setAssistantSpeaking(false);
+    setAssistantStatus(
+      ok ? 'Tap the mic and ask your question.' : 'Audio unavailable on this device.'
+    );
+  };
 
   useEffect(() => {
-    loadChat();
+    void loadChat();
   }, []);
+
+  useSpeechRecognitionEvent('start', () => {
+    setAssistantListening(true);
+    setAssistantStatus('Listening...');
+    transcriptRef.current = '';
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    silenceTimerRef.current = setTimeout(() => {
+      void stopListeningAndAsk();
+    }, 3000);
+  });
+
+  useSpeechRecognitionEvent('result', (event: any) => {
+    const transcript = getTranscriptFromEvent(event);
+    if (transcript) {
+      transcriptRef.current = transcript;
+      setAssistantTranscript(transcript);
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = setTimeout(() => {
+        void stopListeningAndAsk();
+      }, 3000);
+    }
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    setAssistantListening(false);
+    setAssistantStatus('Processing...');
+  });
+
+  useSpeechRecognitionEvent('error', () => {
+    setAssistantListening(false);
+    setAssistantStatus('Could not understand. Try again.');
+  });
+
+  useEffect(() => {
+    return () => {
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      void Speech.stop();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!assistantVisible) {
+      pulse.stopAnimation();
+      pulse.setValue(1);
+      return;
+    }
+
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 1.08,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 900,
+          useNativeDriver: true,
+        }),
+      ])
+    ).start();
+  }, [assistantVisible, pulse]);
 
   const loadChat = async () => {
     try {
@@ -54,31 +203,150 @@ export default function Chat() {
     }
   };
 
+  const postChatMessage = async (message: string, language: AssistantLanguage) => {
+    const response = await axios.post(`${EXPO_PUBLIC_BACKEND_URL}/api/chat`, {
+      user_id: userId,
+      message,
+      language: language.promptName,
+    });
+
+    return String(response.data?.response ?? '');
+  };
+
+  const appendLocalMessage = (role: 'user' | 'assistant', message: string) => {
+    const localMessage: Message = {
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      role,
+      message,
+      timestamp: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, localMessage]);
+  };
+
   const sendMessage = async () => {
-    if (!inputText.trim() || sending) return;
+    if (!inputText.trim() || sending || !userId) return;
 
     const userMessage = inputText.trim();
     setInputText('');
     setSending(true);
+    appendLocalMessage('user', userMessage);
 
     try {
-      await axios.post(`${EXPO_PUBLIC_BACKEND_URL}/api/chat`, {
-        user_id: userId,
-        message: userMessage,
-      });
-
-      // Reload messages to get both user and assistant messages
-      await loadChat();
-      
-      // Scroll to bottom
+      const answer = await postChatMessage(userMessage, selectedLanguage);
+      if (answer) appendLocalMessage('assistant', answer);
+      void loadChat();
       setTimeout(() => {
         scrollViewRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+      }, 120);
     } catch (error) {
       console.error('Error sending message:', error);
     } finally {
       setSending(false);
     }
+  };
+
+  const startListening = async () => {
+    if (sending) return;
+
+    const permissionResult = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (!permissionResult.granted) {
+      if (!permissionResult.canAskAgain) {
+        setAssistantStatus('Microphone permission blocked. Open app settings.');
+        Alert.alert(
+          'Microphone Permission Needed',
+          'Please enable microphone permission in Settings to use voice assistant.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Open Settings',
+              onPress: () => {
+                void Linking.openSettings();
+              },
+            },
+          ]
+        );
+      } else {
+        setAssistantStatus('Microphone permission denied. Please allow it and try again.');
+      }
+      return;
+    }
+
+    try {
+      setAssistantTranscript('');
+      transcriptRef.current = '';
+      await ExpoSpeechRecognitionModule.start({
+        lang: selectedLanguage.locale,
+        interimResults: true,
+        maxAlternatives: 1,
+        continuous: false,
+      });
+    } catch (error) {
+      console.error('Error starting voice recognition:', error);
+      setAssistantStatus('Voice recognition unavailable on this device.');
+    }
+  };
+
+  const stopListeningAndAsk = async () => {
+    if (isVoiceSubmittingRef.current) return;
+
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+
+    try {
+      await ExpoSpeechRecognitionModule.stop();
+    } catch (_error) {
+      // no-op
+    }
+
+    const question = transcriptRef.current.trim() || assistantTranscript.trim();
+    if (!question || !userId) {
+      setAssistantStatus('Ask a question after tapping the mic.');
+      return;
+    }
+
+    isVoiceSubmittingRef.current = true;
+    setSending(true);
+    appendLocalMessage('user', question);
+    setAssistantStatus('Processing your voice...');
+    try {
+      const answer = await postChatMessage(question, selectedLanguage);
+      if (answer) {
+        appendLocalMessage('assistant', answer);
+        await speakText(answer, selectedLanguage.locale);
+      }
+      void loadChat();
+      setAssistantTranscript('');
+      transcriptRef.current = '';
+    } catch (error) {
+      console.error('Error processing assistant request:', error);
+      setAssistantStatus('Assistant could not respond. Try again.');
+    } finally {
+      setSending(false);
+      isVoiceSubmittingRef.current = false;
+      setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 120);
+    }
+  };
+
+  const closeAssistant = async () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    try {
+      await ExpoSpeechRecognitionModule.stop();
+    } catch (_error) {
+      // no-op
+    }
+    await Speech.stop();
+    setAssistantListening(false);
+    setAssistantSpeaking(false);
+    setAssistantTranscript('');
+    setAssistantStatus('Tap the mic and ask your question.');
+    setAssistantVisible(false);
   };
 
   const renderAssistantMessage = (content: string) => {
@@ -155,7 +423,7 @@ export default function Chat() {
           </View>
           <View>
             <Text style={styles.headerTitle}>AI Financial Advisor</Text>
-            <Text style={styles.headerSubtext}>Powered by Gemini</Text>
+            <Text style={styles.headerSubtext}>Chat + Voice Assistant</Text>
           </View>
         </View>
       </View>
@@ -169,35 +437,17 @@ export default function Chat() {
           ref={scrollViewRef}
           style={styles.messagesContainer}
           contentContainerStyle={styles.messagesContent}
-          onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
+          onContentSizeChange={() =>
+            scrollViewRef.current?.scrollToEnd({ animated: true })
+          }
         >
           {messages.length === 0 ? (
             <View style={styles.emptyState}>
               <Ionicons name="chatbubbles-outline" size={64} color="#666" />
               <Text style={styles.emptyText}>Start a conversation</Text>
               <Text style={styles.emptySubtext}>
-                Ask me anything about your spending habits, savings goals, or financial advice!
+                Ask by text, or open Virtual Assistant for voice Q and A.
               </Text>
-              <View style={styles.suggestionsContainer}>
-                <TouchableOpacity
-                  style={styles.suggestionChip}
-                  onPress={() => setInputText('How can I reduce my spending?')}
-                >
-                  <Text style={styles.suggestionText}>How can I reduce my spending?</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.suggestionChip}
-                  onPress={() => setInputText('Analyze my recent transactions')}
-                >
-                  <Text style={styles.suggestionText}>Analyze my recent transactions</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.suggestionChip}
-                  onPress={() => setInputText('Give me savings tips')}
-                >
-                  <Text style={styles.suggestionText}>Give me savings tips</Text>
-                </TouchableOpacity>
-              </View>
             </View>
           ) : (
             messages.map((msg) => (
@@ -224,9 +474,21 @@ export default function Chat() {
                   ) : (
                     <Text style={styles.messageText}>{msg.message}</Text>
                   )}
-                  <Text style={styles.messageTime}>
-                    {format(new Date(msg.timestamp), 'h:mm a')}
-                  </Text>
+                  <View style={styles.messageMetaRow}>
+                    <Text style={styles.messageTime}>
+                      {format(new Date(msg.timestamp), 'h:mm a')}
+                    </Text>
+                    {msg.role === 'assistant' && (
+                      <TouchableOpacity
+                        style={styles.inlineSpeakerButton}
+                        onPress={() => {
+                          void speakText(msg.message, selectedLanguage.locale);
+                        }}
+                      >
+                        <Ionicons name="volume-high-outline" size={13} color="#b8ffcb" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
                 </View>
               </View>
             ))
@@ -244,6 +506,13 @@ export default function Chat() {
         </ScrollView>
 
         <View style={styles.inputContainer}>
+          <TouchableOpacity
+            style={styles.assistantLaunchButton}
+            onPress={() => setAssistantVisible(true)}
+            disabled={sending}
+          >
+            <Ionicons name="person-circle-outline" size={20} color="#fff" />
+          </TouchableOpacity>
           <TextInput
             style={styles.input}
             placeholder="Ask me anything..."
@@ -262,6 +531,91 @@ export default function Chat() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      <Modal visible={assistantVisible} animationType="slide" onRequestClose={closeAssistant}>
+        <SafeAreaView style={styles.assistantModal}>
+          <View style={styles.assistantTopBar}>
+            <Text style={styles.assistantTitle}>Virtual Human Assistant</Text>
+            <TouchableOpacity onPress={closeAssistant} style={styles.closeButton}>
+              <Ionicons name="close" size={22} color="#fff" />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.languageRow}>
+            {ASSISTANT_LANGUAGES.map((language) => (
+              <TouchableOpacity
+                key={language.id}
+                onPress={() => setSelectedLanguage(language)}
+                style={[
+                  styles.languageChip,
+                  selectedLanguage.id === language.id && styles.languageChipActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.languageChipText,
+                    selectedLanguage.id === language.id && styles.languageChipTextActive,
+                  ]}
+                >
+                  {language.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <View style={styles.avatarStage}>
+            <Animated.View
+              style={[
+                styles.avatarOuter,
+                assistantListening && styles.avatarListening,
+                assistantSpeaking && styles.avatarSpeaking,
+                { transform: [{ scale: pulse }] },
+              ]}
+            >
+              <View style={styles.avatarFace}>
+                <View style={styles.avatarEyesRow}>
+                  <View style={styles.avatarEye} />
+                  <View style={styles.avatarEye} />
+                </View>
+                <View style={styles.avatarMouth} />
+              </View>
+            </Animated.View>
+          </View>
+
+          <Text style={styles.assistantStatus}>{assistantStatus}</Text>
+          <Text style={styles.assistantTranscript}>
+            {assistantTranscript || 'Your voice transcript will appear here.'}
+          </Text>
+
+          <View style={styles.assistantButtonsRow}>
+            <TouchableOpacity
+              style={[styles.voiceButton, assistantListening && styles.voiceButtonActive]}
+              onPress={assistantListening ? stopListeningAndAsk : startListening}
+              disabled={sending}
+            >
+              <Ionicons
+                name={assistantListening ? 'checkmark-circle' : 'mic'}
+                size={22}
+                color="#fff"
+              />
+              <Text style={styles.voiceButtonText}>
+                {assistantListening ? 'Send Question' : 'Start Talking'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.voiceButtonSecondary}
+              onPress={() => {
+                void Speech.stop();
+                setAssistantSpeaking(false);
+                setAssistantStatus('Speech stopped.');
+              }}
+            >
+              <Ionicons name="volume-mute" size={20} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -323,23 +677,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 40,
     lineHeight: 20,
-  },
-  suggestionsContainer: {
-    marginTop: 24,
-    gap: 12,
-  },
-  suggestionChip: {
-    backgroundColor: '#1a1a2e',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-  },
-  suggestionText: {
-    color: '#4CAF50',
-    fontSize: 14,
-    fontWeight: '500',
   },
   messageContainer: {
     flexDirection: 'row',
@@ -438,6 +775,23 @@ const styles = StyleSheet.create({
     fontSize: 10,
     marginTop: 8,
   },
+  messageMetaRow: {
+    marginTop: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  inlineSpeakerButton: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2a3f31',
+    backgroundColor: '#132217',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   inputContainer: {
     flexDirection: 'row',
     paddingHorizontal: 16,
@@ -445,7 +799,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#1a1a2e',
     borderTopWidth: 1,
     borderTopColor: '#2a2a3e',
-    gap: 12,
+    gap: 10,
+    alignItems: 'flex-end',
+  },
+  assistantLaunchButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#2563eb',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   input: {
     flex: 1,
@@ -467,5 +830,156 @@ const styles = StyleSheet.create({
   },
   sendButtonDisabled: {
     backgroundColor: '#2a2a3e',
+  },
+  assistantModal: {
+    flex: 1,
+    backgroundColor: '#060b18',
+    paddingHorizontal: 16,
+    paddingBottom: 24,
+  },
+  assistantTopBar: {
+    marginTop: 8,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  assistantTitle: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  closeButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#1b2843',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  languageRow: {
+    marginTop: 18,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  languageChip: {
+    borderWidth: 1,
+    borderColor: '#1f3a6d',
+    borderRadius: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: '#0b1428',
+  },
+  languageChipActive: {
+    backgroundColor: '#2563eb',
+    borderColor: '#2563eb',
+  },
+  languageChipText: {
+    color: '#a8c2ff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  languageChipTextActive: {
+    color: '#fff',
+  },
+  avatarStage: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  avatarOuter: {
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: '#0f1d39',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#244a8f',
+  },
+  avatarListening: {
+    borderColor: '#22c55e',
+    shadowColor: '#22c55e',
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  avatarSpeaking: {
+    borderColor: '#f97316',
+    shadowColor: '#f97316',
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  avatarFace: {
+    width: 130,
+    height: 130,
+    borderRadius: 65,
+    backgroundColor: '#1b2d52',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  avatarEyesRow: {
+    flexDirection: 'row',
+    gap: 24,
+    marginBottom: 18,
+  },
+  avatarEye: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#9fc1ff',
+  },
+  avatarMouth: {
+    width: 38,
+    height: 10,
+    borderRadius: 8,
+    backgroundColor: '#9fc1ff',
+  },
+  assistantStatus: {
+    color: '#fff',
+    textAlign: 'center',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  assistantTranscript: {
+    marginTop: 10,
+    minHeight: 52,
+    color: '#c5d5ff',
+    textAlign: 'center',
+    fontSize: 14,
+    paddingHorizontal: 8,
+  },
+  assistantButtonsRow: {
+    marginTop: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  voiceButton: {
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#2563eb',
+    paddingHorizontal: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  voiceButtonActive: {
+    backgroundColor: '#16a34a',
+  },
+  voiceButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  voiceButtonSecondary: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#1f2937',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });
