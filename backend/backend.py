@@ -585,6 +585,30 @@ def _enforce_rupee_only(text: str) -> str:
     return normalized
 
 
+def _shape_brief_coach_response(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return "I can help with that. What is your top priority right now?"
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        lines = [raw]
+
+    concise_lines: List[str] = []
+    for line in lines:
+        if len(concise_lines) >= 3:
+            break
+        trimmed = re.sub(r"\s+", " ", line).strip()
+        if len(trimmed) > 180:
+            trimmed = trimmed[:177].rstrip() + "..."
+        concise_lines.append(trimmed)
+
+    shaped = "\n".join(concise_lines).strip()
+    if not shaped.endswith("?"):
+        shaped = f"{shaped}\nWhat should we improve first?"
+    return shaped
+
+
 async def _translate_response_if_needed(text: str, language: Optional[str]) -> str:
     target = (language or "").strip()
     if not target or target.lower() in {"english", "en", "en-in", "en-us"}:
@@ -1497,8 +1521,9 @@ async def chat_with_ai(request: ChatRequest):
         "Response style requirements:\n"
         "- Sound like a real human financial coach in conversation.\n"
         "- Be clear, warm, and practical, not robotic.\n"
-        "- Keep response concise (about 4-8 lines) unless user asks for deep detail.\n"
-        "- Include concrete next steps when useful.\n"
+        "- Keep response very short: 2-3 lines max.\n"
+        "- Prefer simple words and direct advice.\n"
+        "- End with exactly one follow-up question to move the conversation forward.\n"
         f"- Respond in {preferred_language}.\n"
         f"- Use only rupee symbol ({RUPEE_SYMBOL}) for money values.\n"
     )
@@ -1532,6 +1557,7 @@ async def chat_with_ai(request: ChatRequest):
         )
 
     response = _enforce_rupee_only(response)
+    response = _shape_brief_coach_response(response)
     response = await _translate_response_if_needed(response, preferred_language)
 
     assistant_msg = ChatMessage(

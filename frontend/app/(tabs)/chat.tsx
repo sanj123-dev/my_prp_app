@@ -59,7 +59,7 @@ export default function Chat() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [sessionId, setSessionId] = useState<string>('');
-  const [conversationMode, setConversationMode] = useState(false);
+  const [conversationMode] = useState(true);
   const [carryoverInsights, setCarryoverInsights] = useState('');
 
   const [assistantVisible, setAssistantVisible] = useState(false);
@@ -67,7 +67,7 @@ export default function Chat() {
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
   const [assistantTranscript, setAssistantTranscript] = useState('');
   const [assistantStatus, setAssistantStatus] = useState(
-    'Tap the mic and ask your question.'
+    'Listening...'
   );
   const [selectedLanguage, setSelectedLanguage] = useState<AssistantLanguage>(
     ASSISTANT_LANGUAGES[0]
@@ -76,7 +76,6 @@ export default function Chat() {
   const scrollViewRef = useRef<ScrollView>(null);
   const pulse = useRef(new Animated.Value(1)).current;
   const transcriptRef = useRef('');
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isVoiceSubmittingRef = useRef(false);
   const preferredMaleVoiceRef = useRef<Record<string, string | undefined>>({});
   const resumeOnFocusRef = useRef(false);
@@ -131,8 +130,8 @@ export default function Chat() {
         Speech.speak(cleaned, {
           language,
           voice: maleVoiceId,
-          rate: 0.95,
-          pitch: 1.0,
+          rate: 0.9,
+          pitch: 0.85,
           volume: 1.0,
           onDone: () => resolve(true),
           onStopped: () => resolve(true),
@@ -151,7 +150,7 @@ export default function Chat() {
 
     setAssistantSpeaking(false);
     setAssistantStatus(
-      ok ? 'Tap the mic and ask your question.' : 'Audio unavailable on this device.'
+      ok ? 'Listening...' : 'Audio unavailable on this device.'
     );
 
     if (conversationMode && assistantVisible && !assistantListening && !sending) {
@@ -169,10 +168,6 @@ export default function Chat() {
     setAssistantListening(true);
     setAssistantStatus('Listening...');
     transcriptRef.current = '';
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    silenceTimerRef.current = setTimeout(() => {
-      void stopListeningAndAsk();
-    }, 3000);
   });
 
   useSpeechRecognitionEvent('result', (event: any) => {
@@ -180,16 +175,13 @@ export default function Chat() {
     if (transcript) {
       transcriptRef.current = transcript;
       setAssistantTranscript(transcript);
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = setTimeout(() => {
-        void stopListeningAndAsk();
-      }, 3000);
     }
   });
 
   useSpeechRecognitionEvent('end', () => {
     setAssistantListening(false);
     setAssistantStatus('Processing...');
+    void stopListeningAndAsk(false);
   });
 
   useSpeechRecognitionEvent('error', () => {
@@ -199,7 +191,6 @@ export default function Chat() {
 
   useEffect(() => {
     return () => {
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       void Speech.stop();
     };
   }, []);
@@ -226,6 +217,14 @@ export default function Chat() {
       ])
     ).start();
   }, [assistantVisible, pulse]);
+
+  useEffect(() => {
+    if (assistantVisible && conversationMode && !assistantListening && !assistantSpeaking && !sending) {
+      setTimeout(() => {
+        void startListening();
+      }, 150);
+    }
+  }, [assistantListening, assistantSpeaking, assistantVisible, conversationMode, sending]);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -362,29 +361,6 @@ export default function Chat() {
     }
   };
 
-  const startConversationMode = async () => {
-    setConversationMode(true);
-    setAssistantStatus('Two-way mode enabled. Speak naturally.');
-    await startListening();
-  };
-
-  const stopConversationMode = async () => {
-    setConversationMode(false);
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
-    try {
-      await ExpoSpeechRecognitionModule.stop();
-    } catch (_error) {
-      // no-op
-    }
-    await Speech.stop();
-    setAssistantListening(false);
-    setAssistantSpeaking(false);
-    setAssistantStatus('Two-way mode stopped.');
-  };
-
   const startListening = async () => {
     if (sending) return;
 
@@ -426,37 +402,37 @@ export default function Chat() {
     }
   };
 
-  const stopListeningAndAsk = async () => {
+  const stopListeningAndAsk = async (forceStop: boolean = true) => {
     if (isVoiceSubmittingRef.current) return;
-
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
-
-    try {
-      await ExpoSpeechRecognitionModule.stop();
-    } catch (_error) {
-      // no-op
+    if (forceStop) {
+      try {
+        await ExpoSpeechRecognitionModule.stop();
+      } catch (_error) {
+        // no-op
+      }
     }
 
     const question = transcriptRef.current.trim() || assistantTranscript.trim();
     if (!question || !userId) {
-      setAssistantStatus('Ask a question after tapping the mic.');
+      if (conversationMode && assistantVisible && !sending) {
+        setAssistantStatus('Listening...');
+        setTimeout(() => {
+          void startListening();
+        }, 120);
+      } else {
+        setAssistantStatus('Listening...');
+      }
       return;
     }
 
     isVoiceSubmittingRef.current = true;
     setSending(true);
-    appendLocalMessage('user', question);
     setAssistantStatus('Processing your voice...');
     try {
       const answer = await postChatMessage(question, selectedLanguage, 'voice');
       if (answer) {
-        appendLocalMessage('assistant', answer);
         await speakText(answer, selectedLanguage.locale);
       }
-      void loadChat();
       setAssistantTranscript('');
       transcriptRef.current = '';
     } catch (error) {
@@ -472,10 +448,6 @@ export default function Chat() {
   };
 
   const closeAssistant = async () => {
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
     try {
       await ExpoSpeechRecognitionModule.stop();
     } catch (_error) {
@@ -484,9 +456,8 @@ export default function Chat() {
     await Speech.stop();
     setAssistantListening(false);
     setAssistantSpeaking(false);
-    setConversationMode(false);
     setAssistantTranscript('');
-    setAssistantStatus('Tap the mic and ask your question.');
+    setAssistantStatus('Listening...');
     setAssistantVisible(false);
   };
 
@@ -734,45 +705,10 @@ export default function Chat() {
           )}
 
           <View style={styles.assistantButtonsRow}>
-            <TouchableOpacity
-              style={[styles.voiceButton, assistantListening && styles.voiceButtonActive]}
-              onPress={assistantListening ? stopListeningAndAsk : startListening}
-              disabled={sending}
-            >
-              <Ionicons
-                name={assistantListening ? 'checkmark-circle' : 'mic'}
-                size={22}
-                color="#fff"
-              />
-              <Text style={styles.voiceButtonText}>
-                {assistantListening ? 'Send Question' : 'Start Talking'}
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.voiceModeButton, conversationMode && styles.voiceModeButtonActive]}
-              onPress={conversationMode ? stopConversationMode : startConversationMode}
-            >
-              <Ionicons
-                name={conversationMode ? 'pause-circle' : 'sync-circle'}
-                size={20}
-                color="#fff"
-              />
-              <Text style={styles.voiceModeButtonText}>
-                {conversationMode ? 'Stop 2-Way' : '2-Way Mode'}
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.voiceButtonSecondary}
-              onPress={() => {
-                void Speech.stop();
-                setAssistantSpeaking(false);
-                setAssistantStatus('Speech stopped.');
-              }}
-            >
-              <Ionicons name="volume-mute" size={20} color="#fff" />
-            </TouchableOpacity>
+            <View style={styles.autoModePill}>
+              <Ionicons name="sync-circle" size={18} color="#9fd4ff" />
+              <Text style={styles.autoModeText}>Auto 2-Way Mode Active</Text>
+            </View>
           </View>
         </SafeAreaView>
       </Modal>
@@ -1118,53 +1054,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   assistantButtonsRow: {
-    marginTop: 22,
+    marginTop: 18,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 10,
-    flexWrap: 'wrap',
   },
-  voiceButton: {
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: '#2563eb',
-    paddingHorizontal: 18,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  voiceButtonActive: {
-    backgroundColor: '#16a34a',
-  },
-  voiceButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  voiceModeButton: {
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: '#334155',
+  autoModePill: {
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#0f223f',
+    borderWidth: 1,
+    borderColor: '#2b4e87',
     paddingHorizontal: 14,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
   },
-  voiceModeButtonActive: {
-    backgroundColor: '#0f766e',
-  },
-  voiceModeButtonText: {
-    color: '#fff',
+  autoModeText: {
+    color: '#c7e7ff',
     fontSize: 13,
     fontWeight: '700',
-  },
-  voiceButtonSecondary: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: '#1f2937',
-    justifyContent: 'center',
-    alignItems: 'center',
   },
 });
