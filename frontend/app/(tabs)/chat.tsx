@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  AppState,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -15,6 +16,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -26,12 +28,14 @@ import * as Speech from 'expo-speech';
 import { format } from 'date-fns';
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+const CHAT_SESSION_ID_KEY = 'chatSessionId';
 
 interface Message {
   id: string;
   role: string;
   message: string;
   timestamp: string;
+  source?: 'text' | 'voice';
 }
 
 type AssistantLanguage = {
@@ -54,6 +58,9 @@ export default function Chat() {
   const [inputText, setInputText] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [sessionId, setSessionId] = useState<string>('');
+  const [conversationMode, setConversationMode] = useState(false);
+  const [carryoverInsights, setCarryoverInsights] = useState('');
 
   const [assistantVisible, setAssistantVisible] = useState(false);
   const [assistantListening, setAssistantListening] = useState(false);
@@ -71,6 +78,8 @@ export default function Chat() {
   const transcriptRef = useRef('');
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isVoiceSubmittingRef = useRef(false);
+  const preferredMaleVoiceRef = useRef<Record<string, string | undefined>>({});
+  const resumeOnFocusRef = useRef(false);
 
   const getTranscriptFromEvent = (event: any): string => {
     const firstResult = event?.results?.[0];
@@ -92,10 +101,36 @@ export default function Chat() {
     const cleaned = (text || '').trim();
     if (!cleaned) return;
 
+    const resolveMaleVoiceId = async () => {
+      const key = locale || 'default';
+      if (preferredMaleVoiceRef.current[key] !== undefined) {
+        return preferredMaleVoiceRef.current[key];
+      }
+
+      try {
+        const voices = await Speech.getAvailableVoicesAsync();
+        const filtered = voices.filter((voice) =>
+          locale ? (voice.language || '').toLowerCase().startsWith(locale.toLowerCase().slice(0, 2)) : true
+        );
+        const maleVoice =
+          filtered.find((voice) => /male|man|david|daniel|alex/i.test(voice.name || '')) ||
+          filtered.find((voice) => /male|man|david|daniel|alex/i.test(voice.identifier || ''));
+
+        preferredMaleVoiceRef.current[key] = maleVoice?.identifier;
+        return maleVoice?.identifier;
+      } catch (_error) {
+        preferredMaleVoiceRef.current[key] = undefined;
+        return undefined;
+      }
+    };
+
+    const maleVoiceId = await resolveMaleVoiceId();
+
     const attemptSpeak = (language?: string) =>
       new Promise<boolean>((resolve) => {
         Speech.speak(cleaned, {
           language,
+          voice: maleVoiceId,
           rate: 0.95,
           pitch: 1.0,
           volume: 1.0,
@@ -118,6 +153,12 @@ export default function Chat() {
     setAssistantStatus(
       ok ? 'Tap the mic and ask your question.' : 'Audio unavailable on this device.'
     );
+
+    if (conversationMode && assistantVisible && !assistantListening && !sending) {
+      setTimeout(() => {
+        void startListening();
+      }, 250);
+    }
   };
 
   useEffect(() => {
@@ -186,15 +227,56 @@ export default function Chat() {
     ).start();
   }, [assistantVisible, pulse]);
 
+  useFocusEffect(
+    React.useCallback(() => {
+      if (resumeOnFocusRef.current && conversationMode && assistantVisible && !assistantListening) {
+        setTimeout(() => {
+          void startListening();
+        }, 200);
+      }
+      resumeOnFocusRef.current = false;
+
+      return () => {
+        if (conversationMode && assistantVisible && assistantListening) {
+          resumeOnFocusRef.current = true;
+          void ExpoSpeechRecognitionModule.stop();
+        }
+      };
+    }, [assistantListening, assistantVisible, conversationMode])
+  );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active' && conversationMode && assistantListening) {
+        resumeOnFocusRef.current = true;
+        void ExpoSpeechRecognitionModule.stop();
+      }
+      if (state === 'active' && resumeOnFocusRef.current && conversationMode && assistantVisible) {
+        setTimeout(() => {
+          void startListening();
+        }, 250);
+        resumeOnFocusRef.current = false;
+      }
+    });
+
+    return () => {
+      sub.remove();
+    };
+  }, [assistantListening, assistantVisible, conversationMode]);
+
   const loadChat = async () => {
     try {
       const savedUserId = await AsyncStorage.getItem('userId');
       if (savedUserId) {
         setUserId(savedUserId);
+        await ensureSession(savedUserId);
         const response = await axios.get(
           `${EXPO_PUBLIC_BACKEND_URL}/api/chat/${savedUserId}`
         );
-        setMessages(response.data);
+        const visibleMessages = (response.data || []).filter(
+          (msg: Message) => (msg.source || 'text') !== 'voice'
+        );
+        setMessages(visibleMessages);
       }
     } catch (error) {
       console.error('Error loading chat:', error);
@@ -203,12 +285,47 @@ export default function Chat() {
     }
   };
 
-  const postChatMessage = async (message: string, language: AssistantLanguage) => {
+  const ensureSession = async (savedUserId: string) => {
+    const existingSessionId = await AsyncStorage.getItem(CHAT_SESSION_ID_KEY);
+    const response = await axios.post(`${EXPO_PUBLIC_BACKEND_URL}/api/chat/session/start`, {
+      user_id: savedUserId,
+      language: selectedLanguage.promptName,
+      existing_session_id: existingSessionId,
+    });
+
+    const nextSessionId = String(response.data?.session_id || '');
+    if (nextSessionId) {
+      setSessionId(nextSessionId);
+      await AsyncStorage.setItem(CHAT_SESSION_ID_KEY, nextSessionId);
+    }
+
+    setCarryoverInsights(String(response.data?.carryover_insights || ''));
+  };
+
+  const postChatMessage = async (
+    message: string,
+    language: AssistantLanguage,
+    source: 'text' | 'voice' = 'text'
+  ) => {
+    let activeSessionId = sessionId;
+    if (!activeSessionId && userId) {
+      await ensureSession(userId);
+      activeSessionId = await AsyncStorage.getItem(CHAT_SESSION_ID_KEY) || '';
+    }
+
     const response = await axios.post(`${EXPO_PUBLIC_BACKEND_URL}/api/chat`, {
       user_id: userId,
       message,
       language: language.promptName,
+      session_id: activeSessionId || undefined,
+      source,
     });
+
+    if (response.data?.session_id && String(response.data.session_id) !== sessionId) {
+      const newSessionId = String(response.data.session_id);
+      setSessionId(newSessionId);
+      await AsyncStorage.setItem(CHAT_SESSION_ID_KEY, newSessionId);
+    }
 
     return String(response.data?.response ?? '');
   };
@@ -232,7 +349,7 @@ export default function Chat() {
     appendLocalMessage('user', userMessage);
 
     try {
-      const answer = await postChatMessage(userMessage, selectedLanguage);
+      const answer = await postChatMessage(userMessage, selectedLanguage, 'text');
       if (answer) appendLocalMessage('assistant', answer);
       void loadChat();
       setTimeout(() => {
@@ -243,6 +360,29 @@ export default function Chat() {
     } finally {
       setSending(false);
     }
+  };
+
+  const startConversationMode = async () => {
+    setConversationMode(true);
+    setAssistantStatus('Two-way mode enabled. Speak naturally.');
+    await startListening();
+  };
+
+  const stopConversationMode = async () => {
+    setConversationMode(false);
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    try {
+      await ExpoSpeechRecognitionModule.stop();
+    } catch (_error) {
+      // no-op
+    }
+    await Speech.stop();
+    setAssistantListening(false);
+    setAssistantSpeaking(false);
+    setAssistantStatus('Two-way mode stopped.');
   };
 
   const startListening = async () => {
@@ -311,7 +451,7 @@ export default function Chat() {
     appendLocalMessage('user', question);
     setAssistantStatus('Processing your voice...');
     try {
-      const answer = await postChatMessage(question, selectedLanguage);
+      const answer = await postChatMessage(question, selectedLanguage, 'voice');
       if (answer) {
         appendLocalMessage('assistant', answer);
         await speakText(answer, selectedLanguage.locale);
@@ -344,6 +484,7 @@ export default function Chat() {
     await Speech.stop();
     setAssistantListening(false);
     setAssistantSpeaking(false);
+    setConversationMode(false);
     setAssistantTranscript('');
     setAssistantStatus('Tap the mic and ask your question.');
     setAssistantVisible(false);
@@ -586,6 +727,11 @@ export default function Chat() {
           <Text style={styles.assistantTranscript}>
             {assistantTranscript || 'Your voice transcript will appear here.'}
           </Text>
+          {!!carryoverInsights && (
+            <Text style={styles.carryoverText} numberOfLines={3}>
+              Memory: {carryoverInsights}
+            </Text>
+          )}
 
           <View style={styles.assistantButtonsRow}>
             <TouchableOpacity
@@ -600,6 +746,20 @@ export default function Chat() {
               />
               <Text style={styles.voiceButtonText}>
                 {assistantListening ? 'Send Question' : 'Start Talking'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.voiceModeButton, conversationMode && styles.voiceModeButtonActive]}
+              onPress={conversationMode ? stopConversationMode : startConversationMode}
+            >
+              <Ionicons
+                name={conversationMode ? 'pause-circle' : 'sync-circle'}
+                size={20}
+                color="#fff"
+              />
+              <Text style={styles.voiceModeButtonText}>
+                {conversationMode ? 'Stop 2-Way' : '2-Way Mode'}
               </Text>
             </TouchableOpacity>
 
@@ -950,12 +1110,20 @@ const styles = StyleSheet.create({
     fontSize: 14,
     paddingHorizontal: 8,
   },
+  carryoverText: {
+    marginTop: 8,
+    color: '#9fb9ef',
+    fontSize: 12,
+    textAlign: 'center',
+    paddingHorizontal: 12,
+  },
   assistantButtonsRow: {
     marginTop: 22,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 10,
+    flexWrap: 'wrap',
   },
   voiceButton: {
     height: 52,
@@ -972,6 +1140,23 @@ const styles = StyleSheet.create({
   voiceButtonText: {
     color: '#fff',
     fontSize: 14,
+    fontWeight: '700',
+  },
+  voiceModeButton: {
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#334155',
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  voiceModeButtonActive: {
+    backgroundColor: '#0f766e',
+  },
+  voiceModeButtonText: {
+    color: '#fff',
+    fontSize: 13,
     fontWeight: '700',
   },
   voiceButtonSecondary: {

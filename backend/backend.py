@@ -120,6 +120,20 @@ class ChatRequest(BaseModel):
     user_id: str
     message: str
     language: Optional[str] = "English"
+    session_id: Optional[str] = None
+    source: Optional[str] = "text"
+
+
+class ChatSessionStartRequest(BaseModel):
+    user_id: str
+    language: Optional[str] = "English"
+    existing_session_id: Optional[str] = None
+
+
+class ChatSessionStartResponse(BaseModel):
+    session_id: str
+    carryover_insights: str
+    reused: bool = False
 
 class User(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -186,7 +200,22 @@ class ChatMessage(BaseModel):
     user_id: str
     role: str
     message: str
+    session_id: Optional[str] = None
+    source: str = "text"
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ChatSession(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    language: str = "English"
+    status: str = "active"
+    carryover_insights: str = ""
+    session_summary: str = ""
+    message_count: int = 0
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    last_activity_at: datetime = Field(default_factory=datetime.utcnow)
+    ended_at: Optional[datetime] = None
 
 class FinancialNewsItem(BaseModel):
     title: str
@@ -739,8 +768,12 @@ def _build_snapshot_prompt(snapshot: Dict[str, Any]) -> str:
     )
 
 
-async def _load_recent_chat_context(user_id: str, limit: int = 8) -> str:
-    rows = await db.chat_messages.find({"user_id": user_id}).sort("timestamp", -1).limit(limit).to_list(limit)
+async def _load_recent_chat_context(user_id: str, limit: int = 8, session_id: Optional[str] = None) -> str:
+    query: Dict[str, Any] = {"user_id": user_id}
+    if session_id:
+        query["session_id"] = session_id
+
+    rows = await db.chat_messages.find(query).sort("timestamp", -1).limit(limit).to_list(limit)
     if not rows:
         return "No prior chat context."
 
@@ -757,6 +790,115 @@ async def _load_recent_chat_context(user_id: str, limit: int = 8) -> str:
         lines.append(f"{label}: {content[:300]}")
 
     return "\n".join(lines[-limit:]) if lines else "No prior chat context."
+
+
+def _build_behavior_summary(messages: List[Dict[str, Any]], snapshot: Dict[str, Any]) -> str:
+    user_text = " ".join(
+        str(item.get("message", "")).lower()
+        for item in messages
+        if str(item.get("role", "")).lower() == "user"
+    )
+    concern_words = ["worry", "worried", "debt", "loan", "credit", "bill", "stress", "urgent"]
+    planning_words = ["plan", "goal", "budget", "save", "invest", "strategy", "improve"]
+
+    concern_score = sum(1 for word in concern_words if word in user_text)
+    planning_score = sum(1 for word in planning_words if word in user_text)
+
+    tone = "balanced"
+    if concern_score >= planning_score + 2:
+        tone = "anxious about money"
+    elif planning_score >= concern_score + 2:
+        tone = "goal-oriented and proactive"
+
+    top_categories = snapshot.get("top_categories", [])
+    top_category_text = (
+        ", ".join(f"{name} ({_format_inr(amount)})" for name, amount in top_categories[:3])
+        if top_categories
+        else "no dominant category yet"
+    )
+
+    return (
+        f"Behavior snapshot: user tone appears {tone}. "
+        f"Net cashflow is {_format_inr(snapshot.get('net_cashflow', 0.0))}. "
+        f"Top spending focus: {top_category_text}. "
+        "Use empathetic, practical coaching and suggest one concrete next step."
+    )
+
+
+async def _get_session_by_id(session_id: Optional[str], user_id: str) -> Optional[Dict[str, Any]]:
+    if not session_id:
+        return None
+    return await db.chat_sessions.find_one({"id": session_id, "user_id": user_id})
+
+
+async def _close_session_if_needed(session: Dict[str, Any], user_id: str) -> None:
+    if not session or session.get("status") != "active":
+        return
+
+    session_id = session.get("id")
+    messages = await db.chat_messages.find({"user_id": user_id, "session_id": session_id}).sort("timestamp", 1).to_list(200)
+    snapshot = await _tool_build_financial_snapshot(user_id)
+    summary = _build_behavior_summary(messages, snapshot)
+
+    await db.chat_sessions.update_one(
+        {"id": session_id, "user_id": user_id},
+        {
+            "$set": {
+                "status": "closed",
+                "session_summary": summary,
+                "ended_at": datetime.utcnow(),
+                "last_activity_at": datetime.utcnow(),
+            }
+        },
+    )
+
+
+async def _get_carryover_insights(user_id: str, limit: int = 3) -> str:
+    rows = await db.chat_sessions.find(
+        {"user_id": user_id, "status": "closed", "session_summary": {"$ne": ""}}
+    ).sort("ended_at", -1).limit(limit).to_list(limit)
+
+    if not rows:
+        return "No prior session insights yet."
+
+    lines = [f"- {str(row.get('session_summary', '')).strip()}" for row in rows if row.get("session_summary")]
+    return "Previous session insights:\n" + ("\n".join(lines[:limit]) if lines else "- No prior session insights yet.")
+
+
+async def _start_or_reuse_chat_session(
+    user_id: str,
+    language: str,
+    existing_session_id: Optional[str],
+    reuse_window_minutes: int = 20,
+) -> Dict[str, Any]:
+    now = datetime.utcnow()
+
+    if existing_session_id:
+        existing = await db.chat_sessions.find_one({"id": existing_session_id, "user_id": user_id, "status": "active"})
+        if existing:
+            last_activity = _as_datetime(existing.get("last_activity_at"))
+            if now - last_activity <= timedelta(minutes=reuse_window_minutes):
+                return {**existing, "_reused": True}
+            await _close_session_if_needed(existing, user_id)
+
+    latest_active = await db.chat_sessions.find_one(
+        {"user_id": user_id, "status": "active"},
+        sort=[("last_activity_at", -1)],
+    )
+    if latest_active:
+        last_activity = _as_datetime(latest_active.get("last_activity_at"))
+        if now - last_activity <= timedelta(minutes=reuse_window_minutes):
+            return {**latest_active, "_reused": True}
+        await _close_session_if_needed(latest_active, user_id)
+
+    carryover = await _get_carryover_insights(user_id)
+    session = ChatSession(
+        user_id=user_id,
+        language=language,
+        carryover_insights=carryover,
+    )
+    await db.chat_sessions.insert_one(session.dict())
+    return {**session.dict(), "_reused": False}
 
 # ==================== ROUTES ====================
 
@@ -1288,24 +1430,67 @@ async def get_financial_news(limit: int = 10):
 
     return sorted_items[: max(1, min(limit, 25))]
 
+@api_router.post("/chat/session/start", response_model=ChatSessionStartResponse)
+async def start_chat_session(request: ChatSessionStartRequest):
+    preferred_language = (request.language or "English").strip() or "English"
+    session = await _start_or_reuse_chat_session(
+        user_id=request.user_id,
+        language=preferred_language,
+        existing_session_id=request.existing_session_id,
+    )
+    return ChatSessionStartResponse(
+        session_id=str(session["id"]),
+        carryover_insights=str(session.get("carryover_insights", "")),
+        reused=bool(session.get("_reused", False)),
+    )
+
+
+@api_router.post("/chat/session/{session_id}/close")
+async def close_chat_session(session_id: str, request: ChatSessionStartRequest):
+    session = await _get_session_by_id(session_id, request.user_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await _close_session_if_needed(session, request.user_id)
+    return {"status": "closed"}
+
+
 @api_router.post("/chat")
 async def chat_with_ai(request: ChatRequest):
+    message_source = (request.source or "text").strip().lower()
+    if message_source not in {"text", "voice"}:
+        message_source = "text"
+
+    preferred_language = (request.language or "English").strip() or "English"
+    active_session = await _start_or_reuse_chat_session(
+        user_id=request.user_id,
+        language=preferred_language,
+        existing_session_id=request.session_id,
+    )
+    session_id = str(active_session["id"])
+
     user_msg = ChatMessage(
         user_id=request.user_id,
         role="user",
         message=request.message,
+        session_id=session_id,
+        source=message_source,
     )
     await db.chat_messages.insert_one(user_msg.dict())
 
     snapshot = await _tool_build_financial_snapshot(request.user_id)
-    recent_chat_context = await _load_recent_chat_context(request.user_id)
+    recent_chat_context = await _load_recent_chat_context(
+        request.user_id,
+        session_id=session_id,
+    )
 
-    preferred_language = (request.language or "English").strip() or "English"
     snapshot_prompt = _build_snapshot_prompt(snapshot)
     wants_data = _is_data_question(request.message)
+    carryover_insights = str(active_session.get("carryover_insights", "")).strip() or "No prior session insights yet."
 
     llm_user_prompt = (
         f"{snapshot_prompt}\n\n"
+        "Carryover behavioral memory from previous sessions:\n"
+        f"{carryover_insights}\n\n"
         "Recent conversation context:\n"
         f"{recent_chat_context}\n\n"
         f"Current user question:\n{request.message}\n\n"
@@ -1353,10 +1538,23 @@ async def chat_with_ai(request: ChatRequest):
         user_id=request.user_id,
         role="assistant",
         message=response,
+        session_id=session_id,
+        source=message_source,
     )
     await db.chat_messages.insert_one(assistant_msg.dict())
 
-    return {"response": response}
+    await db.chat_sessions.update_one(
+        {"id": session_id, "user_id": request.user_id},
+        {
+            "$set": {
+                "last_activity_at": datetime.utcnow(),
+                "language": preferred_language,
+            },
+            "$inc": {"message_count": 2},
+        },
+    )
+
+    return {"response": response, "session_id": session_id}
 
 @api_router.get("/chat/{user_id}", response_model=List[ChatMessage])
 async def get_chat_history(user_id: str, limit: int = 50):
