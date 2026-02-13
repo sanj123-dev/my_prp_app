@@ -10,6 +10,55 @@ class QuizOption(BaseModel):
     correct: bool = False
 
 
+class PlayerProfile(BaseModel):
+    level: int
+    total_xp: int
+    xp_in_level: int
+    xp_to_next_level: int
+    streak_days: int
+    coins: int
+    last_active_date: Optional[str] = None
+
+
+class DailyMission(BaseModel):
+    id: str
+    title: str
+    description: str
+    target: int
+    progress: int
+    reward_xp: int
+    reward_coins: int
+    completed: bool
+    claimed: bool
+
+
+class GameContentCard(BaseModel):
+    id: str
+    title: str
+    hook: str
+    lesson: str
+    action: str
+    difficulty: str
+    reward_xp: int
+
+
+class BossChallenge(BaseModel):
+    id: str
+    title: str
+    description: str
+    target: int
+    progress: int
+    reward_xp: int
+    reward_coins: int
+
+
+class LeaderboardEntry(BaseModel):
+    rank: int
+    user_name: str
+    level: int
+    total_xp: int
+
+
 class LearnTool(BaseModel):
     label: str
     icon: str
@@ -113,6 +162,24 @@ class PitfallSaveResponse(BaseModel):
     saved: bool
 
 
+class QuizAnswerRequest(BaseModel):
+    option_id: str
+
+
+class QuizAnswerResponse(BaseModel):
+    correct: bool
+    feedback: str
+    reward_xp: int
+    reward_coins: int
+    profile: PlayerProfile
+    daily_missions: List[DailyMission]
+
+
+class MissionClaimResponse(BaseModel):
+    mission: DailyMission
+    profile: PlayerProfile
+
+
 class LearnHomeResponse(BaseModel):
     user_name: str
     mascot_progress: int
@@ -120,6 +187,12 @@ class LearnHomeResponse(BaseModel):
     quiz_options: List[QuizOption]
     quiz_feedback_correct: str
     quiz_feedback_wrong: str
+    player_profile: PlayerProfile
+    daily_missions: List[DailyMission]
+    daily_login_reward_claimed: bool
+    today_content: GameContentCard
+    boss_challenge: BossChallenge
+    leaderboard: List[LeaderboardEntry]
     pathways: List[LearnPathwaySummary]
     challenge: ChallengeResponse
     tools: List[LearnTool]

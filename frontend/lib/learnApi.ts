@@ -46,9 +46,64 @@ export type LearnHome = {
   quiz_options: QuizOption[];
   quiz_feedback_correct: string;
   quiz_feedback_wrong: string;
+  player_profile: PlayerProfile;
+  daily_missions: DailyMission[];
+  daily_login_reward_claimed: boolean;
+  today_content: GameContentCard;
+  boss_challenge: BossChallenge;
+  leaderboard: LeaderboardEntry[];
   pathways: LearnPathwaySummary[];
   challenge: Challenge;
   tools: LearnTool[];
+};
+
+export type GameContentCard = {
+  id: string;
+  title: string;
+  hook: string;
+  lesson: string;
+  action: string;
+  difficulty: string;
+  reward_xp: number;
+};
+
+export type BossChallenge = {
+  id: string;
+  title: string;
+  description: string;
+  target: number;
+  progress: number;
+  reward_xp: number;
+  reward_coins: number;
+};
+
+export type LeaderboardEntry = {
+  rank: number;
+  user_name: string;
+  level: number;
+  total_xp: number;
+};
+
+export type PlayerProfile = {
+  level: number;
+  total_xp: number;
+  xp_in_level: number;
+  xp_to_next_level: number;
+  streak_days: number;
+  coins: number;
+  last_active_date?: string | null;
+};
+
+export type DailyMission = {
+  id: string;
+  title: string;
+  description: string;
+  target: number;
+  progress: number;
+  reward_xp: number;
+  reward_coins: number;
+  completed: boolean;
+  claimed: boolean;
 };
 
 export type DailyDose = {
@@ -96,6 +151,20 @@ export type PitfallList = {
   items: Pitfall[];
 };
 
+export type QuizAnswerResult = {
+  correct: boolean;
+  feedback: string;
+  reward_xp: number;
+  reward_coins: number;
+  profile: PlayerProfile;
+  daily_missions: DailyMission[];
+};
+
+export type MissionClaimResult = {
+  mission: DailyMission;
+  profile: PlayerProfile;
+};
+
 const requireBackendUrl = () => {
   if (!EXPO_PUBLIC_BACKEND_URL) {
     throw new Error('Backend URL is not configured');
@@ -122,6 +191,37 @@ export const getLearnHome = async (userId: string): Promise<LearnHome> => {
     return response.data;
   } catch (error) {
     throw new Error(buildMessage(error, 'Unable to load learn home'));
+  }
+};
+
+export const submitLearnQuizAnswer = async (
+  userId: string,
+  optionId: string
+): Promise<QuizAnswerResult> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.post<QuizAnswerResult>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/game/${userId}/quiz-answer`,
+      { option_id: optionId }
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to submit quiz answer'));
+  }
+};
+
+export const claimLearnMission = async (
+  userId: string,
+  missionId: string
+): Promise<MissionClaimResult> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.post<MissionClaimResult>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/learn/game/${userId}/missions/${missionId}/claim`
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to claim mission reward'));
   }
 };
 

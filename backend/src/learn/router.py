@@ -11,13 +11,17 @@ from .schemas import (
     LearnHomeResponse,
     LearnPathwayDetail,
     LearnPathwaySummary,
+    MissionClaimResponse,
     PitfallListResponse,
     PitfallSaveResponse,
+    QuizAnswerRequest,
+    QuizAnswerResponse,
     WatchlistCreateRequest,
     WatchlistItem,
     WatchlistUpdateRequest,
 )
 from .service import (
+    claim_daily_mission,
     claim_daily_dose,
     create_watchlist_item,
     get_challenge,
@@ -29,6 +33,7 @@ from .service import (
     list_glossary_terms,
     list_pathways,
     save_pitfall,
+    submit_quiz_answer,
     toggle_challenge_check_in,
     update_pathway_progress,
     update_watchlist_item,
@@ -44,6 +49,14 @@ def create_learn_router(db_provider) -> APIRouter:
     @learn_router.get("/home/{user_id}", response_model=LearnHomeResponse)
     async def get_learn_home(user_id: str, db=Depends(get_db)):
         return await get_home(db, user_id)
+
+    @learn_router.post("/game/{user_id}/quiz-answer", response_model=QuizAnswerResponse)
+    async def post_quiz_answer(user_id: str, payload: QuizAnswerRequest, db=Depends(get_db)):
+        return await submit_quiz_answer(db, user_id, payload.option_id)
+
+    @learn_router.post("/game/{user_id}/missions/{mission_id}/claim", response_model=MissionClaimResponse)
+    async def post_claim_mission(user_id: str, mission_id: str, db=Depends(get_db)):
+        return await claim_daily_mission(db, user_id, mission_id)
 
     @learn_router.get("/pathways", response_model=List[LearnPathwaySummary])
     async def get_pathways(user_id: Optional[str] = None, db=Depends(get_db)):
