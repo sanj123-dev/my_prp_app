@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -16,7 +16,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { format } from 'date-fns';
+import { useFocusEffect } from '@react-navigation/native';
+import { formatINR } from '../../lib/currency';
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -42,9 +43,11 @@ export default function Credit() {
   const [cardBalance, setCardBalance] = useState('');
   const [creditLimit, setCreditLimit] = useState('');
 
-  useEffect(() => {
-    loadCredits();
-  }, []);
+  useFocusEffect(
+    React.useCallback(() => {
+      void loadCredits();
+    }, [])
+  );
 
   const loadCredits = async () => {
     try {
@@ -143,11 +146,11 @@ export default function Credit() {
               <View style={styles.cardBody}>
                 <View style={styles.balanceRow}>
                   <Text style={styles.balanceLabel}>Balance</Text>
-                  <Text style={styles.balanceValue}>${credit.card_balance.toFixed(2)}</Text>
+                  <Text style={styles.balanceValue}>{formatINR(credit.card_balance)}</Text>
                 </View>
                 <View style={styles.balanceRow}>
                   <Text style={styles.balanceLabel}>Limit</Text>
-                  <Text style={styles.limitValue}>${credit.credit_limit.toFixed(2)}</Text>
+                  <Text style={styles.limitValue}>{formatINR(credit.credit_limit)}</Text>
                 </View>
               </View>
 
@@ -230,7 +233,7 @@ export default function Credit() {
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Current Balance ($) *</Text>
+                <Text style={styles.inputLabel}>Current Balance (Rs) *</Text>
                 <TextInput
                   style={styles.input}
                   placeholder="0.00"
@@ -242,7 +245,7 @@ export default function Credit() {
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Credit Limit ($) *</Text>
+                <Text style={styles.inputLabel}>Credit Limit (Rs) *</Text>
                 <TextInput
                   style={styles.input}
                   placeholder="0.00"

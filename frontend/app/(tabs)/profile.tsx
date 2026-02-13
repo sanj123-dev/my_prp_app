@@ -10,11 +10,13 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
+import type { Href } from 'expo-router';
+import { clearUserId, getSavedUserId, getUserById } from '../../lib/auth';
 
 export default function Profile() {
   const [userId, setUserId] = useState<string>('');
+  const [userName, setUserName] = useState<string>('');
 
   useEffect(() => {
     loadProfile();
@@ -22,9 +24,11 @@ export default function Profile() {
 
   const loadProfile = async () => {
     try {
-      const savedUserId = await AsyncStorage.getItem('userId');
+      const savedUserId = await getSavedUserId();
       if (savedUserId) {
         setUserId(savedUserId);
+        const user = await getUserById(savedUserId);
+        setUserName(user.name);
       }
     } catch (error) {
       console.error('Error loading profile:', error);
@@ -38,28 +42,15 @@ export default function Profile() {
         text: 'Logout',
         style: 'destructive',
         onPress: async () => {
-          await AsyncStorage.removeItem('userId');
-          router.replace('/');
+          await clearUserId();
+          router.replace('/login');
         },
       },
     ]);
   };
 
   const handleClearData = () => {
-    Alert.alert(
-      'Clear All Data',
-      'This will delete all your transactions, credit cards, and chat history. This action cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Clear Data',
-          style: 'destructive',
-          onPress: () => {
-            Alert.alert('Success', 'Data cleared successfully (feature coming soon)');
-          },
-        },
-      ]
-    );
+    navigateTo('/profile/clear-data');
   };
 
   return (
@@ -73,21 +64,22 @@ export default function Profile() {
           <View style={styles.avatarContainer}>
             <Ionicons name="person" size={40} color="#4CAF50" />
           </View>
-          <Text style={styles.userId}>User ID: {userId.substring(0, 8)}...</Text>
+          <Text style={styles.userName}>{userName || 'User'}</Text>
+          <Text style={styles.userId}>{userId ? `${userId.substring(0, 8)}...` : ''}</Text>
         </View>
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Features</Text>
           
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/savings-goals')}>
             <View style={styles.menuItemLeft}>
-              <Ionicons name="target-outline" size={24} color="#4CAF50" />
+              <Ionicons name="trophy-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>Savings Goals</Text>
             </View>
             <Ionicons name="chevron-forward" size={20} color="#666" />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/reminders')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="notifications-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>Reminders</Text>
@@ -95,7 +87,7 @@ export default function Profile() {
             <Ionicons name="chevron-forward" size={20} color="#666" />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/spending-patterns')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="stats-chart-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>Spending Patterns</Text>
@@ -107,7 +99,7 @@ export default function Profile() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Settings</Text>
           
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/dark-mode')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="moon-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>Dark Mode</Text>
@@ -117,7 +109,7 @@ export default function Profile() {
             </View>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/privacy-security')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="shield-checkmark-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>Privacy & Security</Text>
@@ -137,7 +129,7 @@ export default function Profile() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>About</Text>
           
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/about')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="information-circle-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>About SpendWise</Text>
@@ -145,7 +137,7 @@ export default function Profile() {
             <Ionicons name="chevron-forward" size={20} color="#666" />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/help-support')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="help-circle-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>Help & Support</Text>
@@ -153,12 +145,13 @@ export default function Profile() {
             <Ionicons name="chevron-forward" size={20} color="#666" />
           </TouchableOpacity>
 
-          <View style={styles.menuItem}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/about')}>
             <View style={styles.menuItemLeft}>
               <Ionicons name="code-outline" size={24} color="#999" />
               <Text style={styles.menuItemText}>Version 1.0.0</Text>
             </View>
-          </View>
+            <Ionicons name="chevron-forward" size={20} color="#666" />
+          </TouchableOpacity>
         </View>
 
         <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
@@ -215,6 +208,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#999',
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  userName: {
+    fontSize: 20,
+    color: '#fff',
+    fontWeight: '700',
+    marginBottom: 6,
   },
   section: {
     paddingHorizontal: 24,
@@ -292,3 +291,6 @@ const styles = StyleSheet.create({
     color: '#666',
   },
 });
+  const navigateTo = (path: string) => {
+    router.push(path as Href);
+  };

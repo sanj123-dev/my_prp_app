@@ -1,0 +1,91 @@
+import axios, { AxiosError } from 'axios';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+const USER_ID_KEY = 'userId';
+
+type ApiUser = {
+  id: string;
+  name: string;
+  email: string;
+  phone?: string | null;
+  created_at?: string;
+};
+
+export type UserProfile = ApiUser;
+
+export type SignupPayload = {
+  name: string;
+  email: string;
+  password: string;
+  confirm_password: string;
+};
+
+export type LoginPayload = {
+  email: string;
+  password: string;
+};
+
+const requireBackendUrl = () => {
+  if (!EXPO_PUBLIC_BACKEND_URL) {
+    throw new Error('Backend URL is not configured');
+  }
+};
+
+const buildMessage = (error: unknown, fallback: string) => {
+  if (axios.isAxiosError(error)) {
+    const detail = (error as AxiosError<{ detail?: string }>).response?.data?.detail;
+    return detail || fallback;
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return fallback;
+};
+
+export const getSavedUserId = async () => {
+  return AsyncStorage.getItem(USER_ID_KEY);
+};
+
+export const saveUserId = async (userId: string) => {
+  await AsyncStorage.setItem(USER_ID_KEY, userId);
+};
+
+export const clearUserId = async () => {
+  await AsyncStorage.removeItem(USER_ID_KEY);
+};
+
+export const login = async (payload: LoginPayload): Promise<ApiUser> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.post<ApiUser>(`${EXPO_PUBLIC_BACKEND_URL}/api/auth/login`, payload);
+    return response.data;
+  } catch (error) {
+    const message = buildMessage(error, 'Unable to login');
+    throw new Error(message);
+  }
+};
+
+export const signup = async (payload: SignupPayload): Promise<ApiUser> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.post<ApiUser>(`${EXPO_PUBLIC_BACKEND_URL}/api/auth/signup`, payload);
+    return response.data;
+  } catch (error) {
+    const message = buildMessage(error, 'Unable to create account');
+    throw new Error(message);
+  }
+};
+
+export const getUserById = async (userId: string): Promise<UserProfile> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.get<UserProfile>(`${EXPO_PUBLIC_BACKEND_URL}/api/users/${userId}`);
+    return response.data;
+  } catch (error) {
+    const message = buildMessage(error, 'Unable to fetch profile');
+    throw new Error(message);
+  }
+};

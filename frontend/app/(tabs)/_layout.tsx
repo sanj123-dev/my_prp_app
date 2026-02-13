@@ -1,7 +1,33 @@
-import { Tabs } from 'expo-router';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Platform, View } from 'react-native';
+import { Tabs, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { getSavedUserId } from '../../lib/auth';
 
 export default function TabLayout() {
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  useEffect(() => {
+    const ensureSession = async () => {
+      const userId = await getSavedUserId();
+      if (!userId) {
+        router.replace('/login');
+        return;
+      }
+      setCheckingSession(false);
+    };
+
+    void ensureSession();
+  }, []);
+
+  if (checkingSession) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#0f0f1e', justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" color="#4CAF50" />
+      </View>
+    );
+  }
+
   return (
     <Tabs
       screenOptions={{
@@ -12,9 +38,10 @@ export default function TabLayout() {
           backgroundColor: '#1a1a2e',
           borderTopColor: '#2a2a3e',
           borderTopWidth: 1,
-          paddingBottom: 8,
+          paddingBottom: Platform.OS === 'android' ? 14 : 10,
           paddingTop: 8,
-          height: 60,
+          height: Platform.OS === 'android' ? 72 : 68,
+          marginBottom: Platform.OS === 'android' ? 6 : 0,
         },
         tabBarLabelStyle: {
           fontSize: 12,
@@ -28,6 +55,15 @@ export default function TabLayout() {
           title: 'Dashboard',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="grid-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="learn"
+        options={{
+          title: 'Learn',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="school-outline" size={size} color={color} />
           ),
         }}
       />
@@ -67,6 +103,13 @@ export default function TabLayout() {
           ),
         }}
       />
+      <Tabs.Screen
+        name="AnalyticsPanel"
+        options={{
+          href: null,
+        }}
+      />
     </Tabs>
   );
 }
+

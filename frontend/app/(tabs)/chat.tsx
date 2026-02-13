@@ -62,7 +62,7 @@ export default function Chat() {
     setSending(true);
 
     try {
-      const response = await axios.post(`${EXPO_PUBLIC_BACKEND_URL}/api/chat`, {
+      await axios.post(`${EXPO_PUBLIC_BACKEND_URL}/api/chat`, {
         user_id: userId,
         message: userMessage,
       });
@@ -79,6 +79,63 @@ export default function Chat() {
     } finally {
       setSending(false);
     }
+  };
+
+  const renderAssistantMessage = (content: string) => {
+    const lines = content
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      return <Text style={styles.messageText}>{content}</Text>;
+    }
+
+    return (
+      <View style={styles.assistantContent}>
+        {lines.map((line, index) => {
+          const isBullet = /^[-*]\s+/.test(line);
+          const bulletText = line.replace(/^[-*]\s+/, '');
+          const isHeading = !isBullet && line.endsWith(':') && line.length <= 48;
+          const isKeyValue = !isBullet && line.includes(':') && !isHeading;
+
+          if (isHeading) {
+            return (
+              <Text key={`${line}-${index}`} style={styles.assistantHeading}>
+                {line}
+              </Text>
+            );
+          }
+
+          if (isBullet) {
+            return (
+              <View key={`${line}-${index}`} style={styles.bulletRow}>
+                <View style={styles.bulletDot} />
+                <Text style={styles.assistantParagraph}>{bulletText}</Text>
+              </View>
+            );
+          }
+
+          if (isKeyValue) {
+            const parts = line.split(':');
+            const label = parts[0]?.trim();
+            const value = parts.slice(1).join(':').trim();
+            return (
+              <View key={`${line}-${index}`} style={styles.kvRow}>
+                <Text style={styles.kvLabel}>{label}</Text>
+                <Text style={styles.kvValue}>{value}</Text>
+              </View>
+            );
+          }
+
+          return (
+            <Text key={`${line}-${index}`} style={styles.assistantParagraph}>
+              {line}
+            </Text>
+          );
+        })}
+      </View>
+    );
   };
 
   if (loading) {
@@ -162,7 +219,11 @@ export default function Chat() {
                     msg.role === 'user' ? styles.userBubble : styles.assistantBubble,
                   ]}
                 >
-                  <Text style={styles.messageText}>{msg.message}</Text>
+                  {msg.role === 'assistant' ? (
+                    renderAssistantMessage(msg.message)
+                  ) : (
+                    <Text style={styles.messageText}>{msg.message}</Text>
+                  )}
                   <Text style={styles.messageTime}>
                     {format(new Date(msg.timestamp), 'h:mm a')}
                   </Text>
@@ -300,7 +361,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   messageBubble: {
-    maxWidth: '75%',
+    maxWidth: '86%',
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 16,
@@ -320,10 +381,62 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
   },
+  assistantContent: {
+    gap: 8,
+  },
+  assistantHeading: {
+    color: '#b8ffcb',
+    fontSize: 13,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  assistantParagraph: {
+    color: '#e4e8f5',
+    fontSize: 14,
+    lineHeight: 20,
+    flex: 1,
+  },
+  kvRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#131526',
+    borderWidth: 1,
+    borderColor: '#2a2a3e',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  kvLabel: {
+    color: '#9aa0b4',
+    fontSize: 12,
+    fontWeight: '600',
+    flex: 1,
+  },
+  kvValue: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'right',
+    flex: 1,
+  },
+  bulletRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  bulletDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#4CAF50',
+    marginTop: 7,
+  },
   messageTime: {
     color: 'rgba(255,255,255,0.5)',
     fontSize: 10,
-    marginTop: 4,
+    marginTop: 8,
   },
   inputContainer: {
     flexDirection: 'row',

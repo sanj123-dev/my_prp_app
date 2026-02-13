@@ -1,0 +1,35 @@
+# Dependencies / caches
+node_modules/
+.expo/
+.metro-cache/
+dist/
+web-build/
+
+# Native folders/artifacts:
+# Uploading a stale android project can break Gradle dependency resolution.
+# Let EAS generate native project from app config during build.
+android/
+ios/
+
+# Native build artifacts (very large, not needed for EAS upload)
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/.cxx/
+
+# Logs / temp
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# VCS / editor noise
+.git/
+.github/
+.idea/
+.vscode/
+.DS_Store
+
+# Local env files not needed on cloud builder
+.env*.local
