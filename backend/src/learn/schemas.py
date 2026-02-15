@@ -198,6 +198,119 @@ class LearnHomeResponse(BaseModel):
     tools: List[LearnTool]
 
 
+class FinQuestArchetype(BaseModel):
+    id: str
+    title: str
+    subtitle: str
+    mission: str
+
+
+class FinQuestGoalOption(BaseModel):
+    id: str
+    title: str
+    description: str
+    target_amount: int
+    target_years: int
+
+
+class FinQuestIdentity(BaseModel):
+    archetype_id: Optional[str] = None
+    goal_id: Optional[str] = None
+    goal_title: Optional[str] = None
+    target_amount: Optional[int] = None
+    target_years: Optional[int] = None
+
+
+class FinQuestIdentityRequest(BaseModel):
+    archetype_id: str
+    goal_id: str
+
+
+class FinQuestMapNode(BaseModel):
+    id: str
+    title: str
+    chapter: str
+    story: str
+    progress: int
+    unlocked: bool
+    estimated_minutes: int
+
+
+class FinQuestMapResponse(BaseModel):
+    title: str
+    subtitle: str
+    level_title: str
+    streak_days: int
+    daily_quest: str
+    nodes: List[FinQuestMapNode]
+
+
+class FinQuestChapterStep(BaseModel):
+    id: str
+    title: str
+    description: str
+
+
+class FinQuestChapterResponse(BaseModel):
+    id: str
+    title: str
+    chapter: str
+    story_intro: str
+    progress: int
+    reward_xp: int
+    reward_coins: int
+    steps: List[FinQuestChapterStep]
+
+
+class FinQuestChapterProgressRequest(BaseModel):
+    progress: int
+
+
+class FinQuestChapterProgressResponse(BaseModel):
+    chapter_id: str
+    progress: int
+    reward_xp: int
+    reward_coins: int
+    streak_days: int
+
+
+class FinQuestForecastRequest(BaseModel):
+    monthly_contribution: float = Field(..., gt=0)
+    annual_return_pct: float = Field(8.0, ge=0, le=25)
+
+
+class FinQuestForecastResponse(BaseModel):
+    goal_title: str
+    target_amount: float
+    target_years: int
+    projected_years: float
+    years_saved: float
+    message: str
+
+
+class FinQuestGuildMember(BaseModel):
+    rank: int
+    name: str
+    archetype_id: str
+    level: int
+    total_xp: int
+
+
+class FinQuestGuildResponse(BaseModel):
+    guild_name: str
+    weekly_challenge: str
+    your_rank: int
+    members: List[FinQuestGuildMember]
+
+
+class FinQuestBootstrapResponse(BaseModel):
+    user_name: str
+    archetypes: List[FinQuestArchetype]
+    goals: List[FinQuestGoalOption]
+    identity: FinQuestIdentity
+    map: FinQuestMapResponse
+
+
 class SimulationAvatarOption(BaseModel):
     id: str
     name: str

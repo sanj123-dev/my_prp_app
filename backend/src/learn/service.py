@@ -6,6 +6,7 @@ import logging
 import re
 import uuid
 import hashlib
+import math
 
 from fastapi import HTTPException
 
@@ -38,6 +39,18 @@ from .schemas import (
     SimulationRoom,
     SimulationTrade,
     WatchlistItem,
+    FinQuestArchetype,
+    FinQuestBootstrapResponse,
+    FinQuestChapterProgressResponse,
+    FinQuestChapterResponse,
+    FinQuestChapterStep,
+    FinQuestForecastResponse,
+    FinQuestGoalOption,
+    FinQuestGuildMember,
+    FinQuestGuildResponse,
+    FinQuestIdentity,
+    FinQuestMapNode,
+    FinQuestMapResponse,
 )
 
 
@@ -286,6 +299,127 @@ DEFAULT_BOSS_CHALLENGES: List[Dict[str, Any]] = [
     }
 ]
 
+FINQUEST_ARCHETYPES: List[Dict[str, str]] = [
+    {
+        "id": "saver",
+        "title": "The Saver",
+        "subtitle": "Fortress Builder",
+        "mission": "Build a strong emergency base and protect monthly cash flow.",
+    },
+    {
+        "id": "investor",
+        "title": "The Investor",
+        "subtitle": "Asset Commander",
+        "mission": "Grow long-term wealth through diversified investing discipline.",
+    },
+    {
+        "id": "entrepreneur",
+        "title": "The Entrepreneur",
+        "subtitle": "Kingdom Architect",
+        "mission": "Build multiple income streams and scale your money engine.",
+    },
+    {
+        "id": "debt-slayer",
+        "title": "The Debt Slayer",
+        "subtitle": "Chain Breaker",
+        "mission": "Destroy high-interest debt and reclaim your monthly income.",
+    },
+]
+
+FINQUEST_GOALS: List[Dict[str, Any]] = [
+    {
+        "id": "buy-home",
+        "title": "Buy My Home",
+        "description": "Build a down payment fund and become house-ready.",
+        "target_amount": 90000,
+        "target_years": 6,
+    },
+    {
+        "id": "early-retire",
+        "title": "Retire Early",
+        "description": "Reach financial independence faster with consistent investing.",
+        "target_amount": 1200000,
+        "target_years": 20,
+    },
+    {
+        "id": "dream-vacation",
+        "title": "Dream Vacation",
+        "description": "Plan and fund a guilt-free life experience.",
+        "target_amount": 12000,
+        "target_years": 2,
+    },
+    {
+        "id": "clear-debt",
+        "title": "Become Debt Free",
+        "description": "Clear toxic debt and free up future cash flow.",
+        "target_amount": 25000,
+        "target_years": 3,
+    },
+]
+
+FINQUEST_MAP_NODES: List[Dict[str, Any]] = [
+    {
+        "id": "budgeting-basics",
+        "title": "Novice Village",
+        "chapter": "The Awakening",
+        "story": "Patch your leaky money pouch with a practical budget.",
+        "estimated_minutes": 7,
+        "steps": [
+            {"id": "income-expense", "title": "Track In vs Out", "description": "List income and fixed bills."},
+            {"id": "split-plan", "title": "Split Plan", "description": "Assign needs, wants, and savings limits."},
+            {"id": "weekly-check", "title": "Weekly Reset", "description": "Review one improvement each week."},
+        ],
+    },
+    {
+        "id": "emergency-fund",
+        "title": "Blacksmith Forge",
+        "chapter": "The Armory",
+        "story": "Forge your emergency shield against unexpected attacks.",
+        "estimated_minutes": 8,
+        "steps": [
+            {"id": "target", "title": "Shield Target", "description": "Set 3-6 months of expenses as target."},
+            {"id": "auto-save", "title": "Auto Save", "description": "Automate weekly transfers to a safe buffer."},
+            {"id": "milestones", "title": "Milestones", "description": "Track 10%, 25%, 50%, and 100% checkpoints."},
+        ],
+    },
+    {
+        "id": "credit-alliance",
+        "title": "Credit Keeper Tower",
+        "chapter": "The Alliance",
+        "story": "Learn trust signals lenders use and raise your score steadily.",
+        "estimated_minutes": 9,
+        "steps": [
+            {"id": "utilization", "title": "Utilization Guard", "description": "Keep credit usage in a healthy range."},
+            {"id": "on-time", "title": "On-Time Oath", "description": "Automate payments before due dates."},
+            {"id": "mix", "title": "Credit Mix", "description": "Understand how account mix shapes your score."},
+        ],
+    },
+    {
+        "id": "investing-forest",
+        "title": "Investment Forest",
+        "chapter": "Compounding Trail",
+        "story": "Grow your asset army through diversified long-term compounding.",
+        "estimated_minutes": 10,
+        "steps": [
+            {"id": "risk-return", "title": "Risk Compass", "description": "Match asset risk to your timeline."},
+            {"id": "diversify", "title": "Diversification", "description": "Spread risk across sectors and assets."},
+            {"id": "sip", "title": "Auto Invest", "description": "Start recurring monthly investing discipline."},
+        ],
+    },
+    {
+        "id": "future-castle",
+        "title": "Castle of Financial Freedom",
+        "chapter": "Crystal Ball",
+        "story": "Forecast your timeline and choose the fastest safe route.",
+        "estimated_minutes": 6,
+        "steps": [
+            {"id": "goal-input", "title": "Goal Input", "description": "Enter goal amount and monthly contribution."},
+            {"id": "scenario", "title": "Scenario Compare", "description": "Compare low and high return scenarios."},
+            {"id": "plan", "title": "Plan Lock", "description": "Commit to a 90-day financial action plan."},
+        ],
+    },
+]
+
 SIM_STARTING_CASH = 100000.0
 SIM_TRADING_FEE_RATE = 0.001
 SIM_MAX_LEADERBOARD = 25
@@ -462,6 +596,7 @@ async def _ensure_indexes(db: Any) -> None:
         [("user_id", 1), ("pitfall_id", 1)], unique=True
     )
     await db.learn_user_profiles.create_index([("user_id", 1)], unique=True)
+    await db.learn_user_journey.create_index([("user_id", 1)], unique=True)
     await db.learn_user_missions.create_index(
         [("user_id", 1), ("date_key", 1), ("mission_id", 1)], unique=True
     )
@@ -971,6 +1106,267 @@ async def _get_active_challenge_doc(db: Any) -> Dict[str, Any]:
         return fallback
 
     raise HTTPException(status_code=404, detail="Challenge not found")
+
+
+def _finquest_goal_by_id(goal_id: str) -> Optional[Dict[str, Any]]:
+    return next((item for item in FINQUEST_GOALS if item["id"] == goal_id), None)
+
+
+def _finquest_archetype_by_id(archetype_id: str) -> Optional[Dict[str, str]]:
+    return next((item for item in FINQUEST_ARCHETYPES if item["id"] == archetype_id), None)
+
+
+def _finquest_level_title(level: int) -> str:
+    if level >= 12:
+        return "Financial Commander"
+    if level >= 8:
+        return "Wealth Builder"
+    if level >= 4:
+        return "Apprentice Planner"
+    return "Financial Novice"
+
+
+async def _get_or_create_finquest_identity(db: Any, user_id: str) -> Dict[str, Any]:
+    existing = await db.learn_user_journey.find_one({"user_id": user_id})
+    if existing:
+        return existing
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "archetype_id": None,
+        "goal_id": None,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+    await db.learn_user_journey.insert_one(doc)
+    return doc
+
+
+def _finquest_identity_view(identity_doc: Dict[str, Any]) -> FinQuestIdentity:
+    goal = _finquest_goal_by_id(str(identity_doc.get("goal_id") or ""))
+    return FinQuestIdentity(
+        archetype_id=identity_doc.get("archetype_id"),
+        goal_id=identity_doc.get("goal_id"),
+        goal_title=goal["title"] if goal else None,
+        target_amount=int(goal["target_amount"]) if goal else None,
+        target_years=int(goal["target_years"]) if goal else None,
+    )
+
+
+async def _build_finquest_map(db: Any, user_id: str, profile: Optional[PlayerProfile] = None) -> FinQuestMapResponse:
+    if profile is None:
+        profile = _profile_view(await _get_or_create_profile(db, user_id))
+
+    progress_map = await _pathway_progress_map(db, user_id)
+    nodes: List[FinQuestMapNode] = []
+    previous_unlocked = True
+    previous_progress = 100
+
+    for index, node in enumerate(FINQUEST_MAP_NODES):
+        node_id = str(node["id"])
+        progress = int(progress_map.get(node_id, 0))
+        progress = max(0, min(100, progress))
+        unlocked = True if index == 0 else (previous_unlocked and previous_progress >= 70)
+        nodes.append(
+            FinQuestMapNode(
+                id=node_id,
+                title=str(node["title"]),
+                chapter=str(node["chapter"]),
+                story=str(node["story"]),
+                progress=progress,
+                unlocked=unlocked,
+                estimated_minutes=int(node.get("estimated_minutes", 7)),
+            )
+        )
+        previous_unlocked = unlocked
+        previous_progress = progress
+
+    today = _get_today_key()
+    daily_seed = _day_seed(today) % 3
+    daily_quests = [
+        "Complete one chapter step to protect your streak.",
+        "Do a quick crystal-ball forecast and compare timelines.",
+        "Advance any unlocked region by 10% progress.",
+    ]
+    return FinQuestMapResponse(
+        title="Map of Wealth",
+        subtitle="From Novice Village to Financial Freedom Castle.",
+        level_title=_finquest_level_title(profile.level),
+        streak_days=profile.streak_days,
+        daily_quest=daily_quests[daily_seed],
+        nodes=nodes,
+    )
+
+
+async def get_finquest_bootstrap(db: Any, user_id: str) -> FinQuestBootstrapResponse:
+    profile, _ = await _touch_daily_streak(db, user_id)
+    identity_doc = await _get_or_create_finquest_identity(db, user_id)
+    return FinQuestBootstrapResponse(
+        user_name=await _get_user_name(db, user_id),
+        archetypes=[FinQuestArchetype(**item) for item in FINQUEST_ARCHETYPES],
+        goals=[FinQuestGoalOption(**item) for item in FINQUEST_GOALS],
+        identity=_finquest_identity_view(identity_doc),
+        map=await _build_finquest_map(db, user_id, profile=profile),
+    )
+
+
+async def set_finquest_identity(
+    db: Any, user_id: str, archetype_id: str, goal_id: str
+) -> FinQuestIdentity:
+    if not _finquest_archetype_by_id(archetype_id):
+        raise HTTPException(status_code=404, detail="Archetype not found")
+    if not _finquest_goal_by_id(goal_id):
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    await _get_or_create_finquest_identity(db, user_id)
+    await db.learn_user_journey.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "archetype_id": archetype_id,
+                "goal_id": goal_id,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+        upsert=True,
+    )
+    updated = await _get_or_create_finquest_identity(db, user_id)
+    return _finquest_identity_view(updated)
+
+
+async def get_finquest_map(db: Any, user_id: str) -> FinQuestMapResponse:
+    profile = _profile_view(await _get_or_create_profile(db, user_id))
+    return await _build_finquest_map(db, user_id, profile=profile)
+
+
+def _finquest_chapter_node(chapter_id: str) -> Optional[Dict[str, Any]]:
+    return next((item for item in FINQUEST_MAP_NODES if item["id"] == chapter_id), None)
+
+
+async def get_finquest_chapter(db: Any, user_id: str, chapter_id: str) -> FinQuestChapterResponse:
+    node = _finquest_chapter_node(chapter_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+
+    fin_map = await get_finquest_map(db, user_id)
+    node_view = next((item for item in fin_map.nodes if item.id == chapter_id), None)
+    if not node_view or not node_view.unlocked:
+        raise HTTPException(status_code=403, detail="Chapter is locked")
+
+    steps = [FinQuestChapterStep(**item) for item in node.get("steps", [])]
+    return FinQuestChapterResponse(
+        id=chapter_id,
+        title=str(node["title"]),
+        chapter=str(node["chapter"]),
+        story_intro=str(node["story"]),
+        progress=node_view.progress,
+        reward_xp=24,
+        reward_coins=8,
+        steps=steps,
+    )
+
+
+async def update_finquest_chapter_progress(
+    db: Any, user_id: str, chapter_id: str, progress: int
+) -> FinQuestChapterProgressResponse:
+    chapter = await get_finquest_chapter(db, user_id, chapter_id)
+    clamped = max(0, min(100, int(progress)))
+    previous = chapter.progress
+    delta = max(0, clamped - previous)
+
+    await db.learn_user_pathway_progress.update_one(
+        {"user_id": user_id, "pathway_slug": chapter_id},
+        {
+            "$set": {"progress": clamped, "updated_at": datetime.utcnow()},
+            "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": datetime.utcnow()},
+        },
+        upsert=True,
+    )
+
+    reward_xp = int((delta // 10) * 6)
+    reward_coins = int((delta // 10) * 2)
+    if delta > 0:
+        today = _get_today_key()
+        await _ensure_daily_missions(db, user_id, today)
+        await _increment_mission_progress(db, user_id, today, "campaign-step", 1)
+        await _refresh_streak_keeper(db, user_id, today)
+        await _advance_boss_progress(db, user_id, f"chapter-{chapter_id}")
+        if reward_xp > 0 or reward_coins > 0:
+            await _grant_profile_rewards(db, user_id, reward_xp, reward_coins)
+
+    profile = _profile_view(await _get_or_create_profile(db, user_id))
+    return FinQuestChapterProgressResponse(
+        chapter_id=chapter_id,
+        progress=clamped,
+        reward_xp=reward_xp,
+        reward_coins=reward_coins,
+        streak_days=profile.streak_days,
+    )
+
+
+async def get_finquest_forecast(
+    db: Any, user_id: str, monthly_contribution: float, annual_return_pct: float
+) -> FinQuestForecastResponse:
+    identity_doc = await _get_or_create_finquest_identity(db, user_id)
+    identity = _finquest_identity_view(identity_doc)
+    fallback_goal = FINQUEST_GOALS[0]
+    target_amount = float(identity.target_amount or fallback_goal["target_amount"])
+    target_years = int(identity.target_years or fallback_goal["target_years"])
+    goal_title = identity.goal_title or str(fallback_goal["title"])
+
+    monthly = float(max(1.0, monthly_contribution))
+    annual_rate = float(max(0.0, min(25.0, annual_return_pct))) / 100.0
+    monthly_rate = annual_rate / 12.0
+
+    if monthly_rate <= 0:
+        months_needed = target_amount / monthly
+    else:
+        months_needed = (math.log((target_amount * monthly_rate / monthly) + 1)) / math.log(1 + monthly_rate)
+
+    projected_years = max(0.1, months_needed / 12.0)
+    years_saved = round(target_years - projected_years, 1)
+    if years_saved >= 0:
+        message = f"You are projected to hit {goal_title} about {abs(years_saved):.1f} years earlier."
+    else:
+        message = f"You are about {abs(years_saved):.1f} years behind target; increase monthly contribution."
+
+    return FinQuestForecastResponse(
+        goal_title=goal_title,
+        target_amount=round(target_amount, 2),
+        target_years=target_years,
+        projected_years=round(projected_years, 1),
+        years_saved=years_saved,
+        message=message,
+    )
+
+
+async def get_finquest_guild(db: Any, user_id: str) -> FinQuestGuildResponse:
+    board = await _get_leaderboard(db, user_id)
+    members: List[FinQuestGuildMember] = []
+    your_rank = len(board)
+    archetype_cycle = [item["id"] for item in FINQUEST_ARCHETYPES]
+
+    for index, entry in enumerate(board):
+        if entry.user_name.startswith("You"):
+            your_rank = entry.rank
+        archetype_id = archetype_cycle[index % len(archetype_cycle)]
+        members.append(
+            FinQuestGuildMember(
+                rank=entry.rank,
+                name=entry.user_name,
+                archetype_id=archetype_id,
+                level=entry.level,
+                total_xp=entry.total_xp,
+            )
+        )
+
+    return FinQuestGuildResponse(
+        guild_name="SpendWise Guild Hall",
+        weekly_challenge="Complete 3 chapter upgrades and 1 crystal-ball forecast.",
+        your_rank=your_rank,
+        members=members,
+    )
 
 
 async def get_home(db: Any, user_id: str) -> LearnHomeResponse:

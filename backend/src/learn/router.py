@@ -29,6 +29,16 @@ from .schemas import (
     WatchlistCreateRequest,
     WatchlistItem,
     WatchlistUpdateRequest,
+    FinQuestBootstrapResponse,
+    FinQuestChapterProgressRequest,
+    FinQuestChapterProgressResponse,
+    FinQuestChapterResponse,
+    FinQuestForecastRequest,
+    FinQuestForecastResponse,
+    FinQuestGuildResponse,
+    FinQuestIdentity,
+    FinQuestIdentityRequest,
+    FinQuestMapResponse,
 )
 from .service import (
     claim_daily_mission,
@@ -55,6 +65,13 @@ from .service import (
     get_simulation_portfolio,
     join_simulation_room,
     share_simulation_update,
+    get_finquest_bootstrap,
+    set_finquest_identity,
+    get_finquest_map,
+    get_finquest_chapter,
+    update_finquest_chapter_progress,
+    get_finquest_forecast,
+    get_finquest_guild,
 )
 
 
@@ -67,6 +84,53 @@ def create_learn_router(db_provider) -> APIRouter:
     @learn_router.get("/home/{user_id}", response_model=LearnHomeResponse)
     async def get_learn_home(user_id: str, db=Depends(get_db)):
         return await get_home(db, user_id)
+
+    @learn_router.get("/finquest/{user_id}/bootstrap", response_model=FinQuestBootstrapResponse)
+    async def get_user_finquest_bootstrap(user_id: str, db=Depends(get_db)):
+        return await get_finquest_bootstrap(db, user_id)
+
+    @learn_router.put("/finquest/{user_id}/identity", response_model=FinQuestIdentity)
+    async def put_user_finquest_identity(
+        user_id: str, payload: FinQuestIdentityRequest, db=Depends(get_db)
+    ):
+        return await set_finquest_identity(
+            db, user_id=user_id, archetype_id=payload.archetype_id, goal_id=payload.goal_id
+        )
+
+    @learn_router.get("/finquest/{user_id}/map", response_model=FinQuestMapResponse)
+    async def get_user_finquest_map(user_id: str, db=Depends(get_db)):
+        return await get_finquest_map(db, user_id)
+
+    @learn_router.get("/finquest/{user_id}/chapters/{chapter_id}", response_model=FinQuestChapterResponse)
+    async def get_user_finquest_chapter(chapter_id: str, user_id: str, db=Depends(get_db)):
+        return await get_finquest_chapter(db, user_id, chapter_id)
+
+    @learn_router.put(
+        "/finquest/{user_id}/chapters/{chapter_id}/progress",
+        response_model=FinQuestChapterProgressResponse,
+    )
+    async def put_user_finquest_chapter_progress(
+        chapter_id: str,
+        user_id: str,
+        payload: FinQuestChapterProgressRequest,
+        db=Depends(get_db),
+    ):
+        return await update_finquest_chapter_progress(db, user_id, chapter_id, payload.progress)
+
+    @learn_router.post("/finquest/{user_id}/forecast", response_model=FinQuestForecastResponse)
+    async def post_user_finquest_forecast(
+        user_id: str, payload: FinQuestForecastRequest, db=Depends(get_db)
+    ):
+        return await get_finquest_forecast(
+            db,
+            user_id=user_id,
+            monthly_contribution=payload.monthly_contribution,
+            annual_return_pct=payload.annual_return_pct,
+        )
+
+    @learn_router.get("/finquest/{user_id}/guild", response_model=FinQuestGuildResponse)
+    async def get_user_finquest_guild(user_id: str, db=Depends(get_db)):
+        return await get_finquest_guild(db, user_id)
 
     @learn_router.post("/game/{user_id}/quiz-answer", response_model=QuizAnswerResponse)
     async def post_quiz_answer(user_id: str, payload: QuizAnswerRequest, db=Depends(get_db)):
