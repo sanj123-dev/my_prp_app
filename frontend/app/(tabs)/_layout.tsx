@@ -59,15 +59,6 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="learn"
-        options={{
-          title: 'Learn',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="school-outline" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
         name="transactions"
         options={{
           title: 'Transactions',
@@ -77,20 +68,20 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="credit"
+        name="chat"
         options={{
-          title: 'Credit',
+          title: 'Chatbot',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="card-outline" size={size} color={color} />
+            <Ionicons name="chatbubbles-outline" size={size} color={color} />
           ),
         }}
       />
       <Tabs.Screen
-        name="chat"
+        name="learn"
         options={{
-          title: 'AI Chat',
+          title: 'Learn',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="chatbubbles-outline" size={size} color={color} />
+            <Ionicons name="school-outline" size={size} color={color} />
           ),
         }}
       />
@@ -101,6 +92,12 @@ export default function TabLayout() {
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="person-outline" size={size} color={color} />
           ),
+        }}
+      />
+      <Tabs.Screen
+        name="credit"
+        options={{
+          href: null,
         }}
       />
       <Tabs.Screen

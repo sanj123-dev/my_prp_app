@@ -15,7 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Link, router } from 'expo-router';
 import { saveUserId, signup } from '../lib/auth';
-import { setSmsAuthTrigger } from '../lib/smsSync';
+import { requestSmsPermission, setSmsAuthTrigger } from '../lib/smsSync';
 
 export default function SignupScreen() {
   const [name, setName] = useState('');
@@ -45,6 +45,7 @@ export default function SignupScreen() {
       });
       await saveUserId(user.id);
       await setSmsAuthTrigger('signup');
+      await requestSmsPermission();
       router.replace('/(tabs)/dashboard');
     } catch (error) {
       Alert.alert('Signup Failed', error instanceof Error ? error.message : 'Unable to create account');

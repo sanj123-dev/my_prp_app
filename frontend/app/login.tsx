@@ -15,7 +15,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Link, router } from 'expo-router';
 import { login, saveUserId } from '../lib/auth';
-import { setSmsAuthTrigger } from '../lib/smsSync';
+import { requestSmsPermission, setSmsAuthTrigger } from '../lib/smsSync';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -36,6 +36,7 @@ export default function LoginScreen() {
       });
       await saveUserId(user.id);
       await setSmsAuthTrigger('login');
+      await requestSmsPermission();
       router.replace('/(tabs)/dashboard');
     } catch (error) {
       Alert.alert('Login Failed', error instanceof Error ? error.message : 'Unable to login');

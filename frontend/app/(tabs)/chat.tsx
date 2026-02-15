@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
-  AppState,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -16,7 +15,6 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -29,6 +27,8 @@ import { format } from 'date-fns';
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const CHAT_SESSION_ID_KEY = 'chatSessionId';
+const VOICE_SILENCE_DEBOUNCE_MS = 1100;
+const VOICE_WS_PING_MS = 15000;
 
 interface Message {
   id: string;
@@ -46,10 +46,8 @@ type AssistantLanguage = {
 };
 
 const ASSISTANT_LANGUAGES: AssistantLanguage[] = [
-  { id: 'english', label: 'English', locale: 'en-IN', promptName: 'English' },
+  { id: 'english', label: 'English', locale: 'en-US', promptName: 'English' },
   { id: 'hindi', label: 'Hindi', locale: 'hi-IN', promptName: 'Hindi' },
-  { id: 'spanish', label: 'Spanish', locale: 'es-ES', promptName: 'Spanish' },
-  { id: 'french', label: 'French', locale: 'fr-FR', promptName: 'French' },
 ];
 
 export default function Chat() {
@@ -59,15 +57,13 @@ export default function Chat() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [sessionId, setSessionId] = useState<string>('');
-  const [conversationMode] = useState(true);
   const [carryoverInsights, setCarryoverInsights] = useState('');
 
   const [assistantVisible, setAssistantVisible] = useState(false);
   const [assistantListening, setAssistantListening] = useState(false);
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
-  const [assistantTranscript, setAssistantTranscript] = useState('');
   const [assistantStatus, setAssistantStatus] = useState(
-    'Listening...'
+    'Hands-free mode active. Speak anytime.'
   );
   const [selectedLanguage, setSelectedLanguage] = useState<AssistantLanguage>(
     ASSISTANT_LANGUAGES[0]
@@ -77,8 +73,16 @@ export default function Chat() {
   const pulse = useRef(new Animated.Value(1)).current;
   const transcriptRef = useRef('');
   const isVoiceSubmittingRef = useRef(false);
-  const preferredMaleVoiceRef = useRef<Record<string, string | undefined>>({});
-  const resumeOnFocusRef = useRef(false);
+  const voiceSilenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const preferredMaleVoiceRef = useRef<
+    Record<string, { id?: string; language?: string }>
+  >({});
+  const voiceSocketRef = useRef<WebSocket | null>(null);
+  const voiceSocketReadyRef = useRef(false);
+  const voicePingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingVoiceTextResolveRef = useRef<((text: string) => void) | null>(null);
+  const streamingAssistantIdRef = useRef<string>('');
+  const assistantVisibleRef = useRef(false);
 
   const getTranscriptFromEvent = (event: any): string => {
     const firstResult = event?.results?.[0];
@@ -96,11 +100,195 @@ export default function Chat() {
     return '';
   };
 
+  const toWsUrl = (httpUrl: string) => {
+    if (httpUrl.startsWith('https://')) return `wss://${httpUrl.slice('https://'.length)}`;
+    if (httpUrl.startsWith('http://')) return `ws://${httpUrl.slice('http://'.length)}`;
+    return httpUrl;
+  };
+
+  const closeVoiceSocket = () => {
+    if (voicePingTimerRef.current) {
+      clearInterval(voicePingTimerRef.current);
+      voicePingTimerRef.current = null;
+    }
+    if (voiceSocketRef.current) {
+      try {
+        voiceSocketRef.current.close();
+      } catch (_error) {
+        // no-op
+      }
+    }
+    voiceSocketRef.current = null;
+    voiceSocketReadyRef.current = false;
+  };
+
+  const appendOrUpdateStreamingAssistant = (delta: string, isFinal: boolean = false) => {
+    setMessages((prev) => {
+      const streamId = streamingAssistantIdRef.current;
+      if (!streamId) {
+        const id = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        streamingAssistantIdRef.current = id;
+        return [
+          ...prev,
+          {
+            id,
+            role: 'assistant',
+            message: delta,
+            timestamp: new Date().toISOString(),
+          },
+        ];
+      }
+      return prev.map((m) => {
+        if (m.id !== streamId) return m;
+        return {
+          ...m,
+          message: isFinal ? delta : `${m.message}${delta}`,
+          timestamp: new Date().toISOString(),
+        };
+      });
+    });
+  };
+
+  const connectVoiceSocket = async () => {
+    if (!EXPO_PUBLIC_BACKEND_URL || !userId) return false;
+    if (voiceSocketRef.current && voiceSocketReadyRef.current) {
+      try {
+        voiceSocketRef.current.send(
+          JSON.stringify({
+            type: 'session.start',
+            user_id: userId,
+            session_id: sessionId || undefined,
+            language: selectedLanguage.promptName,
+          })
+        );
+      } catch (_error) {
+        // no-op
+      }
+      return true;
+    }
+
+    try {
+      closeVoiceSocket();
+      const wsUrl = `${toWsUrl(EXPO_PUBLIC_BACKEND_URL)}/api/voice/ws`;
+      const ws = new WebSocket(wsUrl);
+      voiceSocketRef.current = ws;
+
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('voice_ws_timeout')), 7000);
+        ws.onopen = () => {
+          clearTimeout(timeout);
+          voiceSocketReadyRef.current = true;
+          resolve();
+        };
+        ws.onerror = () => {
+          clearTimeout(timeout);
+          reject(new Error('voice_ws_error'));
+        };
+      });
+
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(String(event.data || '{}'));
+          const type = String(payload.type || '');
+          if (type === 'session.started') {
+            const nextSession = String(payload.session_id || '');
+            if (nextSession) {
+              setSessionId(nextSession);
+              void AsyncStorage.setItem(CHAT_SESSION_ID_KEY, nextSession);
+            }
+            return;
+          }
+          if (type === 'assistant.response.start') {
+            setAssistantStatus('Assistant thinking...');
+            streamingAssistantIdRef.current = '';
+            return;
+          }
+          if (type === 'assistant.text.delta') {
+            const delta = String(payload.delta || '');
+            if (delta) appendOrUpdateStreamingAssistant(delta, false);
+            return;
+          }
+          if (type === 'assistant.text.final') {
+            const text = String(payload.text || '');
+            if (text) {
+              if (streamingAssistantIdRef.current) {
+                appendOrUpdateStreamingAssistant(text, true);
+              } else {
+                appendLocalMessage('assistant', text);
+              }
+            }
+            const resolve = pendingVoiceTextResolveRef.current;
+            pendingVoiceTextResolveRef.current = null;
+            if (resolve) resolve(text);
+            return;
+          }
+          if (type === 'assistant.response.cancelled') {
+            setAssistantStatus('Listening...');
+            const resolve = pendingVoiceTextResolveRef.current;
+            pendingVoiceTextResolveRef.current = null;
+            if (resolve) resolve('');
+            return;
+          }
+          if (type === 'error') {
+            setAssistantStatus('Voice service error. Retrying...');
+          }
+        } catch (_error) {
+          // no-op
+        }
+      };
+
+      ws.onclose = () => {
+        voiceSocketReadyRef.current = false;
+        if (assistantVisibleRef.current) {
+          setAssistantStatus('Reconnecting voice...');
+          setTimeout(() => {
+            void connectVoiceSocket();
+          }, 800);
+        }
+      };
+
+      ws.send(
+        JSON.stringify({
+          type: 'session.start',
+          user_id: userId,
+          session_id: sessionId || undefined,
+          language: selectedLanguage.promptName,
+        })
+      );
+
+      voicePingTimerRef.current = setInterval(() => {
+        if (!voiceSocketRef.current || !voiceSocketReadyRef.current) return;
+        try {
+          voiceSocketRef.current.send(JSON.stringify({ type: 'ping' }));
+        } catch (_error) {
+          // no-op
+        }
+      }, VOICE_WS_PING_MS);
+
+      return true;
+    } catch (error) {
+      console.error('Voice socket connect failed:', error);
+      voiceSocketReadyRef.current = false;
+      return false;
+    }
+  };
+
+  const sendVoiceWs = async (payload: Record<string, unknown>) => {
+    const ok = await connectVoiceSocket();
+    if (!ok || !voiceSocketRef.current || !voiceSocketReadyRef.current) return false;
+    try {
+      voiceSocketRef.current.send(JSON.stringify(payload));
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  };
+
   const speakText = async (text: string, locale?: string) => {
     const cleaned = (text || '').trim();
     if (!cleaned) return;
 
-    const resolveMaleVoiceId = async () => {
+    const resolveMaleVoice = async () => {
       const key = locale || 'default';
       if (preferredMaleVoiceRef.current[key] !== undefined) {
         return preferredMaleVoiceRef.current[key];
@@ -108,30 +296,55 @@ export default function Chat() {
 
       try {
         const voices = await Speech.getAvailableVoicesAsync();
-        const filtered = voices.filter((voice) =>
-          locale ? (voice.language || '').toLowerCase().startsWith(locale.toLowerCase().slice(0, 2)) : true
-        );
-        const maleVoice =
-          filtered.find((voice) => /male|man|david|daniel|alex/i.test(voice.name || '')) ||
-          filtered.find((voice) => /male|man|david|daniel|alex/i.test(voice.identifier || ''));
+        const localeLower = (locale || '').toLowerCase();
+        const family = localeLower.slice(0, 2);
+        const filtered = voices.filter((voice) => {
+          if (!localeLower) return true;
+          const voiceLang = String(voice.language || '').toLowerCase();
+          return voiceLang.startsWith(family);
+        });
 
-        preferredMaleVoiceRef.current[key] = maleVoice?.identifier;
-        return maleVoice?.identifier;
+        const ranked = filtered
+          .map((voice) => {
+            const name = String(voice.name || '');
+            const identifier = String(voice.identifier || '');
+            const bundle = `${name} ${identifier}`.toLowerCase();
+            const voiceLang = String(voice.language || '').toLowerCase();
+            let score = 0;
+            if (/female|woman|girl|female_|\bf[0-9]\b/.test(bundle)) score -= 120;
+            if (/male|man|david|daniel|alex|aaron|guy|male_|\bm[0-9]\b/.test(bundle)) score += 36;
+            if (/enhanced|premium|neural|natural/.test(bundle)) score += 6;
+            if (localeLower && voiceLang === localeLower) score += 8;
+            if (family && voiceLang.startsWith(family)) score += 3;
+            if (family === 'en' && /en-us|en-gb/.test(voiceLang)) score += 5;
+            if (String((voice as any).quality || '').toLowerCase() === 'enhanced') score += 4;
+            return { id: voice.identifier, language: voice.language, score };
+          })
+          .sort((a, b) => b.score - a.score);
+
+        const best = ranked[0];
+        const chosen =
+          best && best.score > -40
+            ? { id: best.id, language: best.language }
+            : { id: undefined, language: undefined };
+        preferredMaleVoiceRef.current[key] = chosen;
+        return chosen;
       } catch (_error) {
-        preferredMaleVoiceRef.current[key] = undefined;
-        return undefined;
+        const chosen = { id: undefined, language: undefined };
+        preferredMaleVoiceRef.current[key] = chosen;
+        return chosen;
       }
     };
 
-    const maleVoiceId = await resolveMaleVoiceId();
+    const maleVoice = await resolveMaleVoice();
 
-    const attemptSpeak = (language?: string) =>
+    const attemptSpeak = (language?: string, voiceId?: string) =>
       new Promise<boolean>((resolve) => {
         Speech.speak(cleaned, {
           language,
-          voice: maleVoiceId,
-          rate: 0.9,
-          pitch: 0.85,
+          voice: voiceId,
+          rate: 0.97,
+          pitch: 0.82,
           volume: 1.0,
           onDone: () => resolve(true),
           onStopped: () => resolve(true),
@@ -143,55 +356,90 @@ export default function Chat() {
     setAssistantStatus('Speaking...');
     await Speech.stop();
 
-    let ok = await attemptSpeak(locale);
+    let ok = await attemptSpeak(maleVoice.language || locale, maleVoice.id);
     if (!ok) {
-      ok = await attemptSpeak(undefined);
+      ok = await attemptSpeak(locale, undefined);
+    }
+    if (!ok) {
+      ok = await attemptSpeak(undefined, undefined);
     }
 
     setAssistantSpeaking(false);
-    setAssistantStatus(
-      ok ? 'Listening...' : 'Audio unavailable on this device.'
-    );
-
-    if (conversationMode && assistantVisible && !assistantListening && !sending) {
-      setTimeout(() => {
-        void startListening();
-      }, 250);
-    }
+    setAssistantStatus(ok ? 'Hands-free mode active. Speak anytime.' : 'Audio unavailable on this device.');
   };
 
   useEffect(() => {
     void loadChat();
   }, []);
 
+  useEffect(() => {
+    assistantVisibleRef.current = assistantVisible;
+  }, [assistantVisible]);
+
+  useEffect(() => {
+    if (assistantVisible) {
+      void connectVoiceSocket();
+      return;
+    }
+    closeVoiceSocket();
+  }, [assistantVisible, userId, selectedLanguage.id]);
+
   useSpeechRecognitionEvent('start', () => {
+    if (assistantSpeaking) {
+      void Speech.stop();
+      setAssistantSpeaking(false);
+    }
     setAssistantListening(true);
     setAssistantStatus('Listening...');
-    transcriptRef.current = '';
   });
 
   useSpeechRecognitionEvent('result', (event: any) => {
     const transcript = getTranscriptFromEvent(event);
     if (transcript) {
       transcriptRef.current = transcript;
-      setAssistantTranscript(transcript);
+      void sendVoiceWs({ type: 'user.text.partial', text: transcript });
+      if (assistantSpeaking) {
+        void Speech.stop();
+        setAssistantSpeaking(false);
+      }
+      if (voiceSilenceTimerRef.current) {
+        clearTimeout(voiceSilenceTimerRef.current);
+      }
+      voiceSilenceTimerRef.current = setTimeout(() => {
+        void submitVoiceTurn();
+      }, VOICE_SILENCE_DEBOUNCE_MS);
     }
   });
 
   useSpeechRecognitionEvent('end', () => {
     setAssistantListening(false);
-    setAssistantStatus('Processing...');
-    void stopListeningAndAsk(false);
+    const hasPendingSpeech = transcriptRef.current.trim().length > 0;
+    if (hasPendingSpeech && !isVoiceSubmittingRef.current && !sending) {
+      void submitVoiceTurn();
+      return;
+    }
+    if (!assistantVisible || sending || assistantSpeaking || isVoiceSubmittingRef.current) return;
+    setTimeout(() => {
+      void startListening();
+    }, 250);
   });
 
   useSpeechRecognitionEvent('error', () => {
     setAssistantListening(false);
-    setAssistantStatus('Could not understand. Try again.');
+    if (!assistantVisible || sending || assistantSpeaking || isVoiceSubmittingRef.current) return;
+    setAssistantStatus('Listening...');
+    setTimeout(() => {
+      void startListening();
+    }, 450);
   });
 
   useEffect(() => {
     return () => {
       void Speech.stop();
+      if (voiceSilenceTimerRef.current) {
+        clearTimeout(voiceSilenceTimerRef.current);
+      }
+      closeVoiceSocket();
     };
   }, []);
 
@@ -199,6 +447,10 @@ export default function Chat() {
     if (!assistantVisible) {
       pulse.stopAnimation();
       pulse.setValue(1);
+      if (voiceSilenceTimerRef.current) {
+        clearTimeout(voiceSilenceTimerRef.current);
+      }
+      void ExpoSpeechRecognitionModule.stop();
       return;
     }
 
@@ -216,52 +468,21 @@ export default function Chat() {
         }),
       ])
     ).start();
-  }, [assistantVisible, pulse]);
 
-  useEffect(() => {
-    if (assistantVisible && conversationMode && !assistantListening && !assistantSpeaking && !sending) {
+    if (!sending && !assistantSpeaking) {
       setTimeout(() => {
         void startListening();
       }, 150);
     }
-  }, [assistantListening, assistantSpeaking, assistantVisible, conversationMode, sending]);
-
-  useFocusEffect(
-    React.useCallback(() => {
-      if (resumeOnFocusRef.current && conversationMode && assistantVisible && !assistantListening) {
-        setTimeout(() => {
-          void startListening();
-        }, 200);
-      }
-      resumeOnFocusRef.current = false;
-
-      return () => {
-        if (conversationMode && assistantVisible && assistantListening) {
-          resumeOnFocusRef.current = true;
-          void ExpoSpeechRecognitionModule.stop();
-        }
-      };
-    }, [assistantListening, assistantVisible, conversationMode])
-  );
+  }, [assistantVisible, pulse]);
 
   useEffect(() => {
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state !== 'active' && conversationMode && assistantListening) {
-        resumeOnFocusRef.current = true;
-        void ExpoSpeechRecognitionModule.stop();
-      }
-      if (state === 'active' && resumeOnFocusRef.current && conversationMode && assistantVisible) {
-        setTimeout(() => {
-          void startListening();
-        }, 250);
-        resumeOnFocusRef.current = false;
-      }
-    });
-
-    return () => {
-      sub.remove();
-    };
-  }, [assistantListening, assistantVisible, conversationMode]);
+    if (!assistantVisible) return;
+    if (sending || assistantSpeaking) return;
+    setTimeout(() => {
+      void startListening();
+    }, 120);
+  }, [selectedLanguage.id]);
 
   const loadChat = async () => {
     try {
@@ -362,7 +583,12 @@ export default function Chat() {
   };
 
   const startListening = async () => {
-    if (sending) return;
+    if (!assistantVisible || sending || isVoiceSubmittingRef.current) return;
+    if (assistantListening) return;
+    if (assistantSpeaking) {
+      await Speech.stop();
+      setAssistantSpeaking(false);
+    }
 
     const permissionResult = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
     if (!permissionResult.granted) {
@@ -388,59 +614,89 @@ export default function Chat() {
     }
 
     try {
-      setAssistantTranscript('');
-      transcriptRef.current = '';
-      await ExpoSpeechRecognitionModule.start({
-        lang: selectedLanguage.locale,
-        interimResults: true,
-        maxAlternatives: 1,
-        continuous: false,
-      });
+      setAssistantStatus('Listening...');
+      try {
+        await ExpoSpeechRecognitionModule.start({
+          lang: selectedLanguage.locale,
+          interimResults: true,
+          maxAlternatives: 1,
+          continuous: true,
+        });
+      } catch (_firstError) {
+        // Some Android devices fail with continuous mode; fallback to single-shot.
+        await ExpoSpeechRecognitionModule.start({
+          lang: selectedLanguage.locale,
+          interimResults: true,
+          maxAlternatives: 1,
+          continuous: false,
+        });
+      }
     } catch (error) {
       console.error('Error starting voice recognition:', error);
-      setAssistantStatus('Voice recognition unavailable on this device.');
+      setAssistantStatus('Mic not starting. Check permission and try again.');
     }
   };
 
-  const stopListeningAndAsk = async (forceStop: boolean = true) => {
+  const submitVoiceTurn = async () => {
     if (isVoiceSubmittingRef.current) return;
-    if (forceStop) {
-      try {
-        await ExpoSpeechRecognitionModule.stop();
-      } catch (_error) {
-        // no-op
-      }
+    if (voiceSilenceTimerRef.current) {
+      clearTimeout(voiceSilenceTimerRef.current);
+      voiceSilenceTimerRef.current = null;
     }
 
-    const question = transcriptRef.current.trim() || assistantTranscript.trim();
+    const question = transcriptRef.current.trim();
     if (!question || !userId) {
-      if (conversationMode && assistantVisible && !sending) {
-        setAssistantStatus('Listening...');
-        setTimeout(() => {
-          void startListening();
-        }, 120);
-      } else {
-        setAssistantStatus('Listening...');
-      }
+      setAssistantStatus('Listening...');
       return;
     }
 
     isVoiceSubmittingRef.current = true;
+    transcriptRef.current = '';
+    try {
+      await ExpoSpeechRecognitionModule.stop();
+    } catch (_error) {
+      // no-op
+    }
+    setAssistantListening(false);
     setSending(true);
     setAssistantStatus('Processing your voice...');
     try {
-      const answer = await postChatMessage(question, selectedLanguage, 'voice');
+      const answer = await new Promise<string>(async (resolve) => {
+        const timeout = setTimeout(() => {
+          pendingVoiceTextResolveRef.current = null;
+          resolve('');
+        }, 20000);
+        const wrappedResolve = (text: string) => {
+          clearTimeout(timeout);
+          pendingVoiceTextResolveRef.current = null;
+          resolve(text);
+        };
+        pendingVoiceTextResolveRef.current = wrappedResolve;
+        const sent = await sendVoiceWs({
+          type: 'user.text.final',
+          text: question,
+          source: 'voice',
+        });
+        if (!sent) {
+          const fallback = await postChatMessage(question, selectedLanguage, 'voice');
+          wrappedResolve(fallback);
+          return;
+        }
+      });
       if (answer) {
         await speakText(answer, selectedLanguage.locale);
       }
-      setAssistantTranscript('');
-      transcriptRef.current = '';
     } catch (error) {
       console.error('Error processing assistant request:', error);
       setAssistantStatus('Assistant could not respond. Try again.');
     } finally {
       setSending(false);
       isVoiceSubmittingRef.current = false;
+      if (assistantVisible) {
+        setTimeout(() => {
+          void startListening();
+        }, 250);
+      }
       setTimeout(() => {
         scrollViewRef.current?.scrollToEnd({ animated: true });
       }, 120);
@@ -448,6 +704,7 @@ export default function Chat() {
   };
 
   const closeAssistant = async () => {
+    void sendVoiceWs({ type: 'control.interrupt' });
     try {
       await ExpoSpeechRecognitionModule.stop();
     } catch (_error) {
@@ -456,8 +713,11 @@ export default function Chat() {
     await Speech.stop();
     setAssistantListening(false);
     setAssistantSpeaking(false);
-    setAssistantTranscript('');
-    setAssistantStatus('Listening...');
+    if (voiceSilenceTimerRef.current) {
+      clearTimeout(voiceSilenceTimerRef.current);
+      voiceSilenceTimerRef.current = null;
+    }
+    setAssistantStatus('Hands-free mode active. Speak anytime.');
     setAssistantVisible(false);
   };
 
@@ -695,9 +955,6 @@ export default function Chat() {
           </View>
 
           <Text style={styles.assistantStatus}>{assistantStatus}</Text>
-          <Text style={styles.assistantTranscript}>
-            {assistantTranscript || 'Your voice transcript will appear here.'}
-          </Text>
           {!!carryoverInsights && (
             <Text style={styles.carryoverText} numberOfLines={3}>
               Memory: {carryoverInsights}
@@ -705,9 +962,9 @@ export default function Chat() {
           )}
 
           <View style={styles.assistantButtonsRow}>
-            <View style={styles.autoModePill}>
-              <Ionicons name="sync-circle" size={18} color="#9fd4ff" />
-              <Text style={styles.autoModeText}>Auto 2-Way Mode Active</Text>
+            <View style={styles.livePill}>
+              <View style={styles.liveDot} />
+              <Text style={styles.handsFreeHint}>Live voice conversation active</Text>
             </View>
           </View>
         </SafeAreaView>
@@ -1038,14 +1295,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
   },
-  assistantTranscript: {
-    marginTop: 10,
-    minHeight: 52,
-    color: '#c5d5ff',
-    textAlign: 'center',
-    fontSize: 14,
-    paddingHorizontal: 8,
-  },
   carryoverText: {
     marginTop: 8,
     color: '#9fb9ef',
@@ -1055,24 +1304,31 @@ const styles = StyleSheet.create({
   },
   assistantButtonsRow: {
     marginTop: 18,
-    flexDirection: 'row',
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
   },
-  autoModePill: {
-    height: 42,
-    borderRadius: 21,
+  livePill: {
+    height: 36,
+    borderRadius: 18,
     backgroundColor: '#0f223f',
     borderWidth: 1,
     borderColor: '#2b4e87',
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
   },
-  autoModeText: {
+  liveDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#22c55e',
+  },
+  handsFreeHint: {
     color: '#c7e7ff',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
   },
 });

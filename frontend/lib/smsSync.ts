@@ -54,6 +54,10 @@ type RealtimeSmsOptions = {
 };
 
 const getSmsModule = () => {
+  const native = (NativeModules as Record<string, any>)?.SpendWiseSmsReceiver;
+  if (native && typeof native.list === 'function') {
+    return native;
+  }
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     return require('react-native-get-sms-android');
@@ -208,6 +212,10 @@ export const getSmsAuthTrigger = async () => {
 
 export const clearSmsAuthTrigger = async () => {
   await AsyncStorage.removeItem(SMS_AUTH_TRIGGER_KEY);
+};
+
+export const requestSmsPermission = async () => {
+  return requestReadSmsPermissionIfNeeded(true);
 };
 
 export const startRealtimeSmsSync = async ({
