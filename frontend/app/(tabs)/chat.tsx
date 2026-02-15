@@ -26,8 +26,9 @@ import * as Speech from 'expo-speech';
 import { format } from 'date-fns';
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+const EXPO_PUBLIC_VOICE_WS_URL = process.env.EXPO_PUBLIC_VOICE_WS_URL;
 const CHAT_SESSION_ID_KEY = 'chatSessionId';
-const VOICE_SILENCE_DEBOUNCE_MS = 1100;
+const VOICE_SILENCE_DEBOUNCE_MS = 2000;
 const VOICE_WS_PING_MS = 15000;
 
 interface Message {
@@ -65,6 +66,7 @@ export default function Chat() {
   const [assistantStatus, setAssistantStatus] = useState(
     'Hands-free mode active. Speak anytime.'
   );
+  const [assistantMicPrimed, setAssistantMicPrimed] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState<AssistantLanguage>(
     ASSISTANT_LANGUAGES[0]
   );
@@ -83,6 +85,11 @@ export default function Chat() {
   const pendingVoiceTextResolveRef = useRef<((text: string) => void) | null>(null);
   const streamingAssistantIdRef = useRef<string>('');
   const assistantVisibleRef = useRef(false);
+  const voiceWsDisabledRef = useRef(false);
+  const listeningWatchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startInFlightRef = useRef(false);
+  const startTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previousSpeakingRef = useRef(false);
 
   const getTranscriptFromEvent = (event: any): string => {
     const firstResult = event?.results?.[0];
@@ -97,6 +104,27 @@ export default function Chat() {
     if (Array.isArray(event?.value) && typeof event.value[0] === 'string') {
       return event.value[0];
     }
+    if (Array.isArray(event?.results)) {
+      const flattened: string[] = [];
+      for (const result of event.results) {
+        if (typeof result === 'string') {
+          flattened.push(result);
+          continue;
+        }
+        if (result?.transcript && typeof result.transcript === 'string') {
+          flattened.push(result.transcript);
+          continue;
+        }
+        if (Array.isArray(result)) {
+          for (const alt of result) {
+            if (typeof alt === 'string') flattened.push(alt);
+            else if (typeof alt?.transcript === 'string') flattened.push(alt.transcript);
+          }
+        }
+      }
+      const merged = flattened.join(' ').trim();
+      if (merged) return merged;
+    }
     return '';
   };
 
@@ -104,6 +132,13 @@ export default function Chat() {
     if (httpUrl.startsWith('https://')) return `wss://${httpUrl.slice('https://'.length)}`;
     if (httpUrl.startsWith('http://')) return `ws://${httpUrl.slice('http://'.length)}`;
     return httpUrl;
+  };
+
+  const resolveVoiceWsUrl = () => {
+    const explicit = (EXPO_PUBLIC_VOICE_WS_URL || '').trim();
+    if (explicit) return explicit;
+    if (!EXPO_PUBLIC_BACKEND_URL) return '';
+    return `${toWsUrl(EXPO_PUBLIC_BACKEND_URL)}/api/voice/ws`;
   };
 
   const closeVoiceSocket = () => {
@@ -150,7 +185,16 @@ export default function Chat() {
   };
 
   const connectVoiceSocket = async () => {
+    if (voiceWsDisabledRef.current) return false;
     if (!EXPO_PUBLIC_BACKEND_URL || !userId) return false;
+    if (
+      !EXPO_PUBLIC_VOICE_WS_URL &&
+      /vercel\.app/i.test(EXPO_PUBLIC_BACKEND_URL)
+    ) {
+      voiceWsDisabledRef.current = true;
+      setAssistantStatus('Realtime voice unavailable on current backend; using fallback mode.');
+      return false;
+    }
     if (voiceSocketRef.current && voiceSocketReadyRef.current) {
       try {
         voiceSocketRef.current.send(
@@ -169,7 +213,8 @@ export default function Chat() {
 
     try {
       closeVoiceSocket();
-      const wsUrl = `${toWsUrl(EXPO_PUBLIC_BACKEND_URL)}/api/voice/ws`;
+      const wsUrl = resolveVoiceWsUrl();
+      if (!wsUrl) return false;
       const ws = new WebSocket(wsUrl);
       voiceSocketRef.current = ws;
 
@@ -239,7 +284,7 @@ export default function Chat() {
 
       ws.onclose = () => {
         voiceSocketReadyRef.current = false;
-        if (assistantVisibleRef.current) {
+        if (assistantVisibleRef.current && !voiceWsDisabledRef.current) {
           setAssistantStatus('Reconnecting voice...');
           setTimeout(() => {
             void connectVoiceSocket();
@@ -269,6 +314,8 @@ export default function Chat() {
     } catch (error) {
       console.error('Voice socket connect failed:', error);
       voiceSocketReadyRef.current = false;
+      voiceWsDisabledRef.current = true;
+      setAssistantStatus('Realtime voice unavailable; using fallback mode.');
       return false;
     }
   };
@@ -366,6 +413,11 @@ export default function Chat() {
 
     setAssistantSpeaking(false);
     setAssistantStatus(ok ? 'Hands-free mode active. Speak anytime.' : 'Audio unavailable on this device.');
+    if (assistantVisibleRef.current && !sending && !isVoiceSubmittingRef.current) {
+      setTimeout(() => {
+        void startListening();
+      }, 220);
+    }
   };
 
   useEffect(() => {
@@ -378,6 +430,8 @@ export default function Chat() {
 
   useEffect(() => {
     if (assistantVisible) {
+      voiceWsDisabledRef.current = false;
+      setAssistantMicPrimed(false);
       void connectVoiceSocket();
       return;
     }
@@ -385,12 +439,19 @@ export default function Chat() {
   }, [assistantVisible, userId, selectedLanguage.id]);
 
   useSpeechRecognitionEvent('start', () => {
+    startInFlightRef.current = false;
+    if (startTimeoutRef.current) {
+      clearTimeout(startTimeoutRef.current);
+      startTimeoutRef.current = null;
+    }
     if (assistantSpeaking) {
       void Speech.stop();
       setAssistantSpeaking(false);
+      void sendVoiceWs({ type: 'control.interrupt' });
     }
     setAssistantListening(true);
     setAssistantStatus('Listening...');
+    transcriptRef.current = '';
   });
 
   useSpeechRecognitionEvent('result', (event: any) => {
@@ -401,36 +462,51 @@ export default function Chat() {
       if (assistantSpeaking) {
         void Speech.stop();
         setAssistantSpeaking(false);
+        void sendVoiceWs({ type: 'control.interrupt' });
       }
       if (voiceSilenceTimerRef.current) {
         clearTimeout(voiceSilenceTimerRef.current);
       }
       voiceSilenceTimerRef.current = setTimeout(() => {
+        setAssistantStatus('2s pause detected. Responding...');
         void submitVoiceTurn();
       }, VOICE_SILENCE_DEBOUNCE_MS);
     }
   });
 
   useSpeechRecognitionEvent('end', () => {
+    startInFlightRef.current = false;
     setAssistantListening(false);
     const hasPendingSpeech = transcriptRef.current.trim().length > 0;
     if (hasPendingSpeech && !isVoiceSubmittingRef.current && !sending) {
       void submitVoiceTurn();
       return;
     }
-    if (!assistantVisible || sending || assistantSpeaking || isVoiceSubmittingRef.current) return;
+    if (!assistantVisible || !assistantMicPrimed || sending || assistantSpeaking || isVoiceSubmittingRef.current) return;
     setTimeout(() => {
       void startListening();
     }, 250);
   });
 
-  useSpeechRecognitionEvent('error', () => {
+  useSpeechRecognitionEvent('error', (event: any) => {
+    startInFlightRef.current = false;
+    if (startTimeoutRef.current) {
+      clearTimeout(startTimeoutRef.current);
+      startTimeoutRef.current = null;
+    }
     setAssistantListening(false);
-    if (!assistantVisible || sending || assistantSpeaking || isVoiceSubmittingRef.current) return;
-    setAssistantStatus('Listening...');
+    const errText =
+      String(
+        event?.error ||
+          event?.message ||
+          event?.code ||
+          'Speech recognition error'
+      ).trim();
+    setAssistantStatus(`Mic error: ${errText}`);
+    if (!assistantVisible || !assistantMicPrimed || sending || assistantSpeaking || isVoiceSubmittingRef.current) return;
     setTimeout(() => {
       void startListening();
-    }, 450);
+    }, 900);
   });
 
   useEffect(() => {
@@ -438,6 +514,14 @@ export default function Chat() {
       void Speech.stop();
       if (voiceSilenceTimerRef.current) {
         clearTimeout(voiceSilenceTimerRef.current);
+      }
+      if (listeningWatchdogRef.current) {
+        clearInterval(listeningWatchdogRef.current);
+        listeningWatchdogRef.current = null;
+      }
+      if (startTimeoutRef.current) {
+        clearTimeout(startTimeoutRef.current);
+        startTimeoutRef.current = null;
       }
       closeVoiceSocket();
     };
@@ -450,6 +534,15 @@ export default function Chat() {
       if (voiceSilenceTimerRef.current) {
         clearTimeout(voiceSilenceTimerRef.current);
       }
+      if (listeningWatchdogRef.current) {
+        clearInterval(listeningWatchdogRef.current);
+        listeningWatchdogRef.current = null;
+      }
+      if (startTimeoutRef.current) {
+        clearTimeout(startTimeoutRef.current);
+        startTimeoutRef.current = null;
+      }
+      startInFlightRef.current = false;
       void ExpoSpeechRecognitionModule.stop();
       return;
     }
@@ -469,20 +562,42 @@ export default function Chat() {
       ])
     ).start();
 
-    if (!sending && !assistantSpeaking) {
+    if (assistantMicPrimed && !sending && !assistantSpeaking) {
       setTimeout(() => {
         void startListening();
       }, 150);
     }
+
+    if (listeningWatchdogRef.current) {
+      clearInterval(listeningWatchdogRef.current);
+    }
+    listeningWatchdogRef.current = setInterval(() => {
+      if (!assistantVisibleRef.current) return;
+      if (!assistantMicPrimed) return;
+      if (assistantListening || assistantSpeaking || sending || isVoiceSubmittingRef.current) return;
+      void startListening();
+    }, 1800);
   }, [assistantVisible, pulse]);
 
   useEffect(() => {
-    if (!assistantVisible) return;
+    if (!assistantVisible || !assistantMicPrimed) return;
     if (sending || assistantSpeaking) return;
     setTimeout(() => {
       void startListening();
     }, 120);
-  }, [selectedLanguage.id]);
+  }, [selectedLanguage.id, assistantMicPrimed]);
+
+  useEffect(() => {
+    const justStoppedSpeaking = previousSpeakingRef.current && !assistantSpeaking;
+    previousSpeakingRef.current = assistantSpeaking;
+    if (!justStoppedSpeaking) return;
+    if (!assistantVisibleRef.current || !assistantMicPrimed) return;
+    if (sending || isVoiceSubmittingRef.current || assistantListening) return;
+    setAssistantStatus('Listening...');
+    setTimeout(() => {
+      void startListening();
+    }, 180);
+  }, [assistantSpeaking, assistantMicPrimed, sending, assistantListening]);
 
   const loadChat = async () => {
     try {
@@ -583,8 +698,10 @@ export default function Chat() {
   };
 
   const startListening = async () => {
-    if (!assistantVisible || sending || isVoiceSubmittingRef.current) return;
+    if (!assistantVisible || !assistantMicPrimed || sending || isVoiceSubmittingRef.current) return;
     if (assistantListening) return;
+    if (startInFlightRef.current) return;
+    startInFlightRef.current = true;
     if (assistantSpeaking) {
       await Speech.stop();
       setAssistantSpeaking(false);
@@ -610,6 +727,7 @@ export default function Chat() {
       } else {
         setAssistantStatus('Microphone permission denied. Please allow it and try again.');
       }
+      startInFlightRef.current = false;
       return;
     }
 
@@ -631,9 +749,22 @@ export default function Chat() {
           continuous: false,
         });
       }
+      if (startTimeoutRef.current) {
+        clearTimeout(startTimeoutRef.current);
+      }
+      startTimeoutRef.current = setTimeout(() => {
+        if (!assistantListening && assistantVisibleRef.current) {
+          startInFlightRef.current = false;
+          setAssistantStatus('Retrying microphone...');
+          setTimeout(() => {
+            void startListening();
+          }, 200);
+        }
+      }, 3000);
     } catch (error) {
       console.error('Error starting voice recognition:', error);
       setAssistantStatus('Mic not starting. Check permission and try again.');
+      startInFlightRef.current = false;
     }
   };
 
@@ -692,11 +823,11 @@ export default function Chat() {
     } finally {
       setSending(false);
       isVoiceSubmittingRef.current = false;
-      if (assistantVisible) {
-        setTimeout(() => {
-          void startListening();
-        }, 250);
-      }
+    if (assistantVisible) {
+      setTimeout(() => {
+        void startListening();
+      }, 250);
+    }
       setTimeout(() => {
         scrollViewRef.current?.scrollToEnd({ animated: true });
       }, 120);
@@ -718,7 +849,16 @@ export default function Chat() {
       voiceSilenceTimerRef.current = null;
     }
     setAssistantStatus('Hands-free mode active. Speak anytime.');
+    setAssistantMicPrimed(false);
     setAssistantVisible(false);
+  };
+
+  const primeAssistantMic = async () => {
+    setAssistantMicPrimed(true);
+    setAssistantStatus('Starting microphone...');
+    setTimeout(() => {
+      void startListening();
+    }, 100);
   };
 
   const renderAssistantMessage = (content: string) => {
@@ -962,9 +1102,24 @@ export default function Chat() {
           )}
 
           <View style={styles.assistantButtonsRow}>
+            {!assistantMicPrimed && (
+              <TouchableOpacity
+                style={styles.enableMicButton}
+                onPress={() => {
+                  void primeAssistantMic();
+                }}
+              >
+                <Ionicons name="mic" size={18} color="#fff" />
+                <Text style={styles.enableMicText}>Enable Voice</Text>
+              </TouchableOpacity>
+            )}
             <View style={styles.livePill}>
               <View style={styles.liveDot} />
-              <Text style={styles.handsFreeHint}>Live voice conversation active</Text>
+              <Text style={styles.handsFreeHint}>
+                {assistantMicPrimed
+                  ? 'Live voice conversation active'
+                  : 'Tap Enable Voice once to start listening'}
+              </Text>
             </View>
           </View>
         </SafeAreaView>
@@ -1308,6 +1463,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
+  },
+  enableMicButton: {
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#2563eb',
+    borderWidth: 1,
+    borderColor: '#2f6cf2',
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  enableMicText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
   },
   livePill: {
     height: 36,

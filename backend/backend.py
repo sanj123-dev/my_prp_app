@@ -22,6 +22,7 @@ import requests
 
 from openai import AsyncOpenAI
 from src.learn import create_learn_router, init_learn_module
+from src.assistant import create_assistant_router, init_assistant_module
 
 # ==================== INIT ====================
 
@@ -1970,6 +1971,7 @@ async def get_chat_history(user_id: str, limit: int = 50):
 
 app.include_router(api_router)
 app.include_router(create_learn_router(lambda: db), prefix="/api")
+app.include_router(create_assistant_router(lambda: db), prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1987,6 +1989,10 @@ async def startup_tasks():
         await init_learn_module(db)
     except Exception as error:
         logging.exception("Learn module init failed at startup: %s", error)
+    try:
+        await init_assistant_module(db)
+    except Exception as error:
+        logging.exception("Assistant module init failed at startup: %s", error)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
