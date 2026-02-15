@@ -489,10 +489,24 @@ async def _ensure_seed_data(db: Any) -> None:
             upsert=True,
         )
 
+    # Keep a single lesson document keyed by stable id. We rotate its date_key
+    # daily instead of inserting new docs, because the collection has a unique
+    # index on "id".
     lesson = {**DEFAULT_DAILY_LESSON, "date_key": _get_today_key()}
     await db.learn_daily_lessons.update_one(
-        {"date_key": lesson["date_key"]},
-        {"$setOnInsert": {**lesson, "created_at": now}},
+        {"id": lesson["id"]},
+        {
+            "$set": {
+                "tag": lesson["tag"],
+                "title": lesson["title"],
+                "body": lesson["body"],
+                "steps": lesson["steps"],
+                "reward_xp": lesson["reward_xp"],
+                "date_key": lesson["date_key"],
+                "updated_at": now,
+            },
+            "$setOnInsert": {"created_at": now},
+        },
         upsert=True,
     )
 
@@ -1144,10 +1158,35 @@ async def update_pathway_progress(
 
 async def get_daily_dose(db: Any, user_id: str) -> DailyDoseResponse:
     date_key = _get_today_key()
-    lesson = await db.learn_daily_lessons.find_one({"date_key": date_key})
+    lesson = await db.learn_daily_lessons.find_one({"id": DEFAULT_DAILY_LESSON["id"]})
     if not lesson:
-        lesson = {**DEFAULT_DAILY_LESSON, "date_key": date_key}
-        await db.learn_daily_lessons.insert_one({**lesson, "created_at": datetime.utcnow()})
+        now = datetime.utcnow()
+        await db.learn_daily_lessons.update_one(
+            {"id": DEFAULT_DAILY_LESSON["id"]},
+            {
+                "$set": {
+                    "tag": DEFAULT_DAILY_LESSON["tag"],
+                    "title": DEFAULT_DAILY_LESSON["title"],
+                    "body": DEFAULT_DAILY_LESSON["body"],
+                    "steps": DEFAULT_DAILY_LESSON["steps"],
+                    "reward_xp": DEFAULT_DAILY_LESSON["reward_xp"],
+                    "date_key": date_key,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {
+                    "id": DEFAULT_DAILY_LESSON["id"],
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+        lesson = await db.learn_daily_lessons.find_one({"id": DEFAULT_DAILY_LESSON["id"]})
+    elif lesson.get("date_key") != date_key:
+        await db.learn_daily_lessons.update_one(
+            {"id": lesson["id"]},
+            {"$set": {"date_key": date_key, "updated_at": datetime.utcnow()}},
+        )
+        lesson["date_key"] = date_key
 
     claim = await db.learn_user_daily_claims.find_one({"user_id": user_id, "date_key": date_key})
     streak_days = await db.learn_user_daily_claims.count_documents({"user_id": user_id})

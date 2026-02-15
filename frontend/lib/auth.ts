@@ -34,9 +34,17 @@ const requireBackendUrl = () => {
 
 const buildMessage = (error: unknown, fallback: string) => {
   if (axios.isAxiosError(error)) {
-    const detail = (error as AxiosError<{ detail?: string }>).response?.data?.detail;
-    return detail || fallback;
-  }
+    const detail = (error as AxiosError<{ detail?: string | { msg?: string }[] }>).response?.data?.detail;
+    if (typeof detail === 'string' && detail.trim()) {
+      return detail;
+    }
+    if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0];
+      if (first && typeof first.msg === 'string' && first.msg.trim()) {
+        return first.msg;
+      }
+    }
+    }
 
   if (error instanceof Error) {
     return error.message;

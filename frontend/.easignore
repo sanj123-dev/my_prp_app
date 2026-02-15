@@ -5,13 +5,7 @@ node_modules/
 dist/
 web-build/
 
-# Native folders/artifacts:
-# Uploading a stale android project can break Gradle dependency resolution.
-# Let EAS generate native project from app config during build.
-android/
-ios/
-
-# Native build artifacts (very large, not needed for EAS upload)
+# Keep android/ source, ignore only generated Android artifacts
 android/.gradle/
 android/build/
 android/app/build/
@@ -31,5 +25,5 @@ yarn-error.*
 .vscode/
 .DS_Store
 
-# Local env files not needed on cloud builder
+# Local env overrides
 .env*.local

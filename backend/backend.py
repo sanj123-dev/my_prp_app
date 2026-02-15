@@ -943,6 +943,15 @@ async def create_user(user: UserCreate):
     await db.users.insert_one(user_obj.dict())
     return user_obj
 
+async def _find_auth_user_by_email(normalized_email: str) -> Optional[Dict[str, Any]]:
+    candidates = await db.users.find({"email": normalized_email}).sort("created_at", -1).to_list(20)
+    if not candidates:
+        return None
+    for candidate in candidates:
+        if candidate.get("password_hash"):
+            return candidate
+    return candidates[0]
+
 @api_router.post("/auth/signup", response_model=User)
 async def signup(request: SignupRequest):
     if request.password != request.confirm_password:
@@ -951,10 +960,29 @@ async def signup(request: SignupRequest):
     if len(request.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
-    normalized_email = request.email.lower()
-    existing_user = await db.users.find_one({"email": normalized_email})
-    if existing_user:
+    normalized_email = request.email.strip().lower()
+    existing_user = await _find_auth_user_by_email(normalized_email)
+    if existing_user and existing_user.get("password_hash"):
         raise HTTPException(status_code=409, detail="Email already exists")
+
+    # Legacy fallback: some old users may exist without a password hash.
+    # Convert that record into an auth-capable account instead of blocking signup.
+    if existing_user and not existing_user.get("password_hash"):
+        password_hash = pwd_context.hash(request.password)
+        await db.users.update_one(
+            {"id": existing_user["id"]},
+            {
+                "$set": {
+                    "name": request.name.strip() or existing_user.get("name", "User"),
+                    "email": normalized_email,
+                    "password_hash": password_hash,
+                }
+            },
+        )
+        patched = await db.users.find_one({"id": existing_user["id"]})
+        if not patched:
+            raise HTTPException(status_code=500, detail="Unable to create account")
+        return User(**patched)
 
     user_obj = User(
         name=request.name.strip(),
@@ -968,14 +996,19 @@ async def signup(request: SignupRequest):
 
 @api_router.post("/auth/login", response_model=User)
 async def login(request: LoginRequest):
-    normalized_email = request.email.lower()
-    existing_user = await db.users.find_one({"email": normalized_email})
+    normalized_email = request.email.strip().lower()
+    existing_user = await _find_auth_user_by_email(normalized_email)
 
     if not existing_user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     password_hash = existing_user.get("password_hash")
-    if not password_hash or not pwd_context.verify(request.password, password_hash):
+    if not password_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Account exists without password. Please sign up again to set a password.",
+        )
+    if not pwd_context.verify(request.password, password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     return User(**existing_user)
@@ -1607,7 +1640,10 @@ logging.basicConfig(level=logging.INFO)
 
 @app.on_event("startup")
 async def startup_tasks():
-    await init_learn_module(db)
+    try:
+        await init_learn_module(db)
+    except Exception as error:
+        logging.exception("Learn module init failed at startup: %s", error)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
