@@ -16,6 +16,7 @@ The runtime uses:
 ## Endpoints
 - `POST /api/assistant/session/start`
 - `POST /api/assistant/chat`
+- `POST /api/assistant/feedback`
 - `GET /api/assistant/chat/{user_id}?session_id=...&limit=...`
 - `POST /api/assistant/memory/upsert`
 - `POST /api/assistant/knowledge/upsert`

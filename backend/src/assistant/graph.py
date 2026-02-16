@@ -30,6 +30,12 @@ class AssistantGraphState(TypedDict, total=False):
     daily_checkin: bool
     goal_change: bool
     requires_professional_disclaimer: bool
+    dissatisfied: bool
+    user_tone: str
+    response_style: str
+    query_focus: Dict[str, Any]
+    recent_dialogue: List[Dict[str, str]]
+    user_style_preferences: Dict[str, Any]
     agent_trace: List[str]
 
 
@@ -91,6 +97,9 @@ class AssistantGraph:
         message = state.get("message", "")
         trace = list(state.get("agent_trace", []))
         lowered = message.lower()
+        user_tone = self.tools.infer_user_tone(message)
+        dissatisfied = self.tools.detect_dissatisfaction(message)
+        query_focus = self.tools.finance_query_focus(message)
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -146,16 +155,26 @@ class AssistantGraph:
             "daily_checkin": daily_checkin,
             "goal_change": goal_change,
             "requires_professional_disclaimer": requires_professional_disclaimer,
+            "dissatisfied": dissatisfied,
+            "user_tone": user_tone,
+            "query_focus": query_focus,
             "agent_trace": trace,
         }
 
     async def _retriever_agent(self, state: AssistantGraphState) -> AssistantGraphState:
         user_id = state["user_id"]
+        session_id = state["session_id"]
         message = state["message"]
         trace = list(state.get("agent_trace", []))
 
         hits = await self.tools.semantic_context(user_id=user_id, query=message, limit=6)
         profile = await self.tools.user_profile_summary(user_id)
+        recent_dialogue = await self.tools.recent_dialogue(user_id=user_id, session_id=session_id, limit=8)
+        user_style_preferences = await self.tools.user_style_preferences(user_id=user_id)
+        response_style = self.tools.preferred_response_style(message=message, dialogue=recent_dialogue)
+        preferred_style = str(user_style_preferences.get("style_preference", "balanced"))
+        if response_style == "balanced" and preferred_style in {"concise", "detailed", "example_driven", "balanced"}:
+            response_style = preferred_style
         context_lines = []
         citations: List[Dict[str, Any]] = []
         for item in hits[:4]:
@@ -174,6 +193,9 @@ class AssistantGraph:
             "retrieved_context": "\n".join(context_lines) if context_lines else "No relevant context found.",
             "citations": citations,
             "user_profile": profile,
+            "recent_dialogue": recent_dialogue,
+            "user_style_preferences": user_style_preferences,
+            "response_style": response_style,
             "agent_trace": trace,
         }
 
@@ -182,6 +204,7 @@ class AssistantGraph:
         message = state["message"]
         context = state.get("retrieved_context", "")
         intent = state.get("intent", "planning")
+        query_focus = state.get("query_focus", {})
         trace = list(state.get("agent_trace", []))
 
         snapshot = await self.tools.financial_snapshot(user_id=user_id, days=45)
@@ -191,23 +214,30 @@ class AssistantGraph:
                 (
                     "system",
                     "You are a senior financial analyst assistant. "
-                    "Use provided metrics exactly. Prioritize trend insight and practical explanation.",
+                    "Use provided metrics exactly. Prioritize trend insight and practical explanation. "
+                    "Avoid repeating only net cashflow unless the user explicitly asked for it.",
                 ),
                 (
                     "human",
                     "Intent: {intent}\n"
+                    "Query focus: {query_focus}\n"
                     "User message:\n{message}\n\n"
                     "Financial snapshot:\n{snapshot}\n\n"
                     "Analytics report:\n{analytics}\n\n"
                     "Retrieved context:\n{context}\n\n"
                     "Return a concise analysis with:\n"
-                    "1) key metric\n2) trend direction\n3) one actionable next step.",
+                    "1) direct answer to user ask\n"
+                    "2) strongest metric for requested focus\n"
+                    "3) trend direction\n"
+                    "4) one action the user can choose.\n"
+                    "If focus includes category_breakdown/anomalies/velocity_7d/goal_progress, prioritize those over generic net cashflow.",
                 ),
             ]
         )
         response = await (prompt | self.llm).ainvoke(
             {
                 "intent": intent,
+                "query_focus": json.dumps(query_focus),
                 "message": message,
                 "snapshot": json.dumps(snapshot),
                 "analytics": json.dumps(analytics),
@@ -234,24 +264,38 @@ class AssistantGraph:
         daily_checkin = bool(state.get("daily_checkin", False))
         goal_change = bool(state.get("goal_change", False))
         needs_disclaimer = bool(state.get("requires_professional_disclaimer", False))
+        dissatisfied = bool(state.get("dissatisfied", False))
+        user_tone = state.get("user_tone", "neutral")
+        response_style = state.get("response_style", "balanced")
+        recent_dialogue = state.get("recent_dialogue", [])
+        query_focus = state.get("query_focus", {})
+        user_style_preferences = state.get("user_style_preferences", {})
         trace = list(state.get("agent_trace", []))
 
         prompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
-                    "You are CalmCoach. Warm, concise, non-judgmental money habit coach.\n"
+                    "You are CalmCoach. Warm, concise, non-judgmental, friend-like money coach.\n"
                     "Always personalize with profile context naturally.\n"
                     "For data/analytics queries, mention concrete numbers from snapshot/analytics.\n"
+                    "Adapt tone to user emotional state and prior conversation style.\n"
+                    "Vary phrasing and structure so replies do not feel repetitive.\n"
                     "Never recommend risky investing, loans, gambling, or fear-based action.\n"
                     "Ask before any financial action/automation.",
                 ),
                 (
                     "human",
                     "Intent: {intent}\nLanguage: {language}\nUser message: {message}\n\n"
+                    "User tone: {user_tone}\n"
+                    "Preferred response style: {response_style}\n"
+                    "Dissatisfied signal: {dissatisfied}\n"
+                    "Query focus: {query_focus}\n\n"
+                    "Persisted user style preferences: {user_style_preferences}\n\n"
                     "Daily check-in requested: {daily_checkin}\n"
                     "Goal-change detected: {goal_change}\n"
                     "Needs professional disclaimer: {needs_disclaimer}\n\n"
+                    "Recent dialogue window: {recent_dialogue}\n\n"
                     "User profile context: {profile}\n\n"
                     "Financial snapshot: {snapshot}\n\n"
                     "Analytics report: {analytics}\n\n"
@@ -259,8 +303,10 @@ class AssistantGraph:
                     "Retrieved context: {context}\n\n"
                     "Output format:\n"
                     "- Use \\u20B9 for money values.\n"
-                    "- Normal response: 1-3 short sentences and one gentle follow-up question.\n"
+                    "- Normal response: 2-5 short sentences and one gentle follow-up question.\n"
                     "- If intent=data_query, include at least one trend insight.\n"
+                    "- If dissatisfied=true, start with a short apology and then provide a fresher style response.\n"
+                    "- Avoid repeating the phrase 'net cash flow' unless explicitly requested.\n"
                     "- If daily_checkin is true, use 4 short lines:\n"
                     "1) greeting with user's name\n"
                     "2) quick status update tied to goal\n"
@@ -274,9 +320,15 @@ class AssistantGraph:
                 "intent": intent,
                 "language": language,
                 "message": message,
+                "user_tone": user_tone,
+                "response_style": response_style,
+                "dissatisfied": dissatisfied,
+                "query_focus": json.dumps(query_focus),
+                "user_style_preferences": json.dumps(user_style_preferences),
                 "daily_checkin": daily_checkin,
                 "goal_change": goal_change,
                 "needs_disclaimer": needs_disclaimer,
+                "recent_dialogue": json.dumps(recent_dialogue),
                 "profile": json.dumps(profile),
                 "snapshot": json.dumps(snapshot),
                 "analytics": json.dumps(analytics),
@@ -298,6 +350,9 @@ class AssistantGraph:
         daily_checkin = bool(state.get("daily_checkin", False))
         goal_change = bool(state.get("goal_change", False))
         needs_disclaimer = bool(state.get("requires_professional_disclaimer", False))
+        dissatisfied = bool(state.get("dissatisfied", False))
+        user_id = state.get("user_id", "")
+        query_focus = state.get("query_focus", {})
         trace = list(state.get("agent_trace", []))
 
         prompt = ChatPromptTemplate.from_messages(
@@ -314,7 +369,9 @@ class AssistantGraph:
                     "- No password/OTP content.\n"
                     "- Use \\u20B9 for money.\n"
                     "- If daily_checkin=true: return exactly 4 short lines in required structure.\n"
-                    "- Else: 1-3 short sentences + one gentle follow-up question.\n"
+                    "- Else: 2-5 short sentences + one gentle follow-up question.\n"
+                    "- If dissatisfied=true include a brief apology and ensure wording is clearly different from repetitive style.\n"
+                    "- Prefer metrics aligned with query_focus over generic net cashflow.\n"
                     "- If needs_disclaimer=true include this exact sentence:\n"
                     "I can share general information, but for legal or regulated financial decisions, please consult a licensed professional.\n"
                     "- If goal_change=true include this exact sentence:\n"
@@ -325,9 +382,11 @@ class AssistantGraph:
                     "human",
                     "Language: {language}\n"
                     "User message: {message}\n"
+                    "query_focus: {query_focus}\n"
                     "daily_checkin: {daily_checkin}\n"
                     "goal_change: {goal_change}\n"
                     "needs_disclaimer: {needs_disclaimer}\n\n"
+                    "dissatisfied: {dissatisfied}\n\n"
                     "Candidate response:\n{response}",
                 ),
             ]
@@ -338,9 +397,11 @@ class AssistantGraph:
                 {
                     "language": language,
                     "message": message,
+                    "query_focus": json.dumps(query_focus),
                     "daily_checkin": daily_checkin,
                     "goal_change": goal_change,
                     "needs_disclaimer": needs_disclaimer,
+                    "dissatisfied": dissatisfied,
                     "response": response,
                 }
             )
@@ -363,6 +424,20 @@ class AssistantGraph:
             required_goal = "Want me to update your profile with this new goal?"
             if required_goal not in final_text:
                 final_text = f"{final_text}\n{required_goal}".strip()
+
+        if dissatisfied:
+            lowered = final_text.lower()
+            if "sorry" not in lowered:
+                final_text = f"Sorry about that. {final_text}".strip()
+            if user_id:
+                try:
+                    await self.tools.store_feedback_memory(
+                        user_id=user_id,
+                        text=f"User disliked repetitive reply pattern. Message: {message[:220]}",
+                        tags=["feedback", "dissatisfied", "style", "avoid-repetition"],
+                    )
+                except Exception:
+                    pass
 
         trace.append("validator:checked")
         return {"response": final_text, "agent_trace": trace}

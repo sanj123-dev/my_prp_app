@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from statistics import mean, median, pstdev
 from typing import Any, Dict, List
+import re
+import uuid
 
 from .semantic import SemanticDoc, SimpleSemanticSearch
 
@@ -235,3 +237,129 @@ class AssistantTools:
             "recent_transaction_count": len(tx),
             "recent_spend_30_entries": round(recent_spend, 2),
         }
+
+    async def recent_dialogue(self, user_id: str, session_id: str, limit: int = 8) -> List[Dict[str, str]]:
+        docs = await (
+            self.db.assistant_messages
+            .find({"user_id": user_id, "session_id": session_id})
+            .sort("created_at", -1)
+            .limit(limit)
+            .to_list(limit)
+        )
+        docs.reverse()
+        dialogue: List[Dict[str, str]] = []
+        for doc in docs:
+            role = str(doc.get("role", "")).strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(doc.get("content", "")).strip()
+            if not content:
+                continue
+            dialogue.append({"role": role, "content": content[:320]})
+        return dialogue
+
+    async def user_style_preferences(self, user_id: str) -> Dict[str, Any]:
+        pref = await self.db.assistant_user_prefs.find_one({"user_id": user_id}) or {}
+        style_preference = str(pref.get("style_preference", "")).strip()
+        if style_preference not in {"concise", "detailed", "example_driven", "balanced"}:
+            style_preference = "balanced"
+        tone_preference = str(pref.get("tone_preference", "")).strip() or "neutral"
+        style_scores = pref.get("style_scores", {}) or {}
+        return {
+            "style_preference": style_preference,
+            "tone_preference": tone_preference,
+            "style_scores": {
+                "concise": int(style_scores.get("concise", 0) or 0),
+                "detailed": int(style_scores.get("detailed", 0) or 0),
+                "example_driven": int(style_scores.get("example_driven", 0) or 0),
+                "balanced": int(style_scores.get("balanced", 0) or 0),
+            },
+        }
+
+    def detect_dissatisfaction(self, text: str) -> bool:
+        lowered = (text or "").strip().lower()
+        if not lowered:
+            return False
+        phrases = [
+            "boring",
+            "bore",
+            "same thing",
+            "repeat",
+            "repetitive",
+            "not helpful",
+            "didn't help",
+            "did not help",
+            "you always",
+            "stop repeating",
+            "bad answer",
+            "wrong answer",
+            "not satisfied",
+            "useless",
+            "annoying",
+            "frustrated",
+        ]
+        return any(phrase in lowered for phrase in phrases)
+
+    def infer_user_tone(self, text: str) -> str:
+        lowered = (text or "").strip().lower()
+        if not lowered:
+            return "neutral"
+        if any(token in lowered for token in ["urgent", "asap", "quick", "immediately", "now"]):
+            return "urgent"
+        if any(token in lowered for token in ["worried", "stress", "anxious", "overwhelmed"]):
+            return "stressed"
+        if any(token in lowered for token in ["hey", "buddy", "bro", "chill", "casual"]):
+            return "casual"
+        if "?" in lowered or any(token in lowered for token in ["explain", "why", "how", "what"]):
+            return "curious"
+        return "neutral"
+
+    def preferred_response_style(self, message: str, dialogue: List[Dict[str, str]]) -> str:
+        prior_user_text = " ".join(item.get("content", "") for item in dialogue if item.get("role") == "user")
+        text = f"{prior_user_text} {message}".lower()
+        if any(token in text for token in ["short", "brief", "quick answer", "just answer", "tldr"]):
+            return "concise"
+        if any(token in text for token in ["detailed", "in detail", "deep", "step by step"]):
+            return "detailed"
+        if any(token in text for token in ["example", "sample", "show me"]):
+            return "example_driven"
+        return "balanced"
+
+    def finance_query_focus(self, message: str) -> Dict[str, Any]:
+        text = (message or "").strip().lower()
+        focus: List[str] = []
+        rules = [
+            ("cashflow", ["cash flow", "cashflow", "net", "income vs expense"]),
+            ("spending_trend", ["trend", "month over month", "pattern"]),
+            ("category_breakdown", ["category", "breakdown", "where i spend", "spent most"]),
+            ("anomalies", ["anomaly", "unusual", "outlier", "suspicious", "unexpected"]),
+            ("velocity_7d", ["last 7 days", "weekly", "this week", "velocity"]),
+            ("savings_actions", ["save", "reduce", "cut", "optimize", "improve"]),
+            ("goal_progress", ["goal", "target", "progress"]),
+            ("education", ["what is", "meaning", "explain"]),
+        ]
+        for name, keys in rules:
+            if any(key in text for key in keys):
+                focus.append(name)
+
+        if not focus:
+            focus = ["cashflow", "savings_actions"]
+
+        money_hits = re.findall(r"(?:rs\.?|inr|\$|₹)\s*([0-9]+(?:\.[0-9]+)?)", text, flags=re.IGNORECASE)
+        return {
+            "focus": focus[:4],
+            "has_amount_constraint": bool(money_hits),
+            "amount_values": [float(match) for match in money_hits[:4]],
+        }
+
+    async def store_feedback_memory(self, user_id: str, text: str, tags: List[str]) -> Dict[str, Any]:
+        payload = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "text": text.strip()[:500],
+            "tags": tags[:20],
+            "source": "assistant_feedback",
+            "created_at": datetime.utcnow(),
+        }
+        await self.db.assistant_memories.insert_one(payload)
+        return payload

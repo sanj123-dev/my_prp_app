@@ -57,6 +57,25 @@ class AssistantChatResponse(BaseModel):
     citations: List[AssistantCitation] = Field(default_factory=list)
 
 
+class AssistantFeedbackRequest(BaseModel):
+    user_id: str
+    value: Literal["up", "down"]
+    session_id: Optional[str] = None
+    message_id: Optional[str] = None
+    feedback_text: Optional[str] = None
+    preferred_style: Optional[Literal["concise", "detailed", "example_driven", "balanced"]] = None
+    preferred_tone: Optional[Literal["casual", "neutral", "supportive", "direct"]] = None
+
+
+class AssistantFeedbackResponse(BaseModel):
+    status: Literal["recorded"] = "recorded"
+    user_id: str
+    feedback_id: str
+    updated_style_preference: str
+    style_scores: Dict[str, int] = Field(default_factory=dict)
+    updated_tone_preference: Optional[str] = None
+
+
 class AssistantMemoryUpsertRequest(BaseModel):
     user_id: str
     text: str

@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from .schemas import (
     AssistantChatRequest,
     AssistantChatResponse,
+    AssistantFeedbackRequest,
+    AssistantFeedbackResponse,
     AssistantKnowledgeUpsertRequest,
     AssistantMemoryUpsertRequest,
     AssistantSessionStartRequest,
@@ -52,6 +54,19 @@ def create_assistant_router(db_provider) -> APIRouter:
             language=(payload.language or "English"),
         )
         return AssistantChatResponse(**result)
+
+    @router.post("/feedback", response_model=AssistantFeedbackResponse)
+    async def assistant_feedback(payload: AssistantFeedbackRequest, service: AssistantService = Depends(get_service)):
+        result = await service.submit_feedback(
+            user_id=payload.user_id,
+            value=payload.value,
+            session_id=payload.session_id,
+            message_id=payload.message_id,
+            feedback_text=payload.feedback_text,
+            preferred_style=payload.preferred_style,
+            preferred_tone=payload.preferred_tone,
+        )
+        return AssistantFeedbackResponse(**result)
 
     @router.get("/chat/{user_id}")
     async def get_assistant_history(
