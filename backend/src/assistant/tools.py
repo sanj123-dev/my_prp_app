@@ -161,6 +161,72 @@ class AssistantTools:
             "anomalies": anomalies,
         }
 
+    async def transaction_summary(
+        self,
+        user_id: str,
+        *,
+        start_iso: str,
+        end_iso: str,
+        limit: int = 12,
+    ) -> Dict[str, Any]:
+        start = self._as_datetime(start_iso)
+        end = self._as_datetime(end_iso)
+        docs = await self.db.transactions.find({"user_id": user_id}).to_list(5000)
+
+        selected: List[Dict[str, Any]] = []
+        for doc in docs:
+            dt = self._as_datetime(doc.get("date", doc.get("created_at")))
+            if start <= dt < end:
+                selected.append({**doc, "_dt": dt})
+
+        selected.sort(key=lambda item: item["_dt"], reverse=True)
+        debit = sum(
+            float(d.get("amount", 0.0) or 0.0)
+            for d in selected
+            if str(d.get("transaction_type", "debit")) == "debit"
+        )
+        credit = sum(
+            float(d.get("amount", 0.0) or 0.0)
+            for d in selected
+            if str(d.get("transaction_type", "debit")) == "credit"
+        )
+
+        category_totals: Dict[str, float] = {}
+        for d in selected:
+            if str(d.get("transaction_type", "debit")) != "debit":
+                continue
+            cat = str(d.get("category", "Other"))
+            category_totals[cat] = category_totals.get(cat, 0.0) + float(d.get("amount", 0.0) or 0.0)
+
+        top_categories = [
+            {"name": name, "amount": round(amount, 2)}
+            for name, amount in sorted(category_totals.items(), key=lambda item: item[1], reverse=True)[:6]
+        ]
+
+        transactions = []
+        for item in selected[:max(5, min(limit, 20))]:
+            transactions.append(
+                {
+                    "date": item["_dt"].strftime("%Y-%m-%d"),
+                    "description": str(item.get("description", ""))[:120],
+                    "category": str(item.get("category", "Other")),
+                    "transaction_type": str(item.get("transaction_type", "debit")),
+                    "amount": round(float(item.get("amount", 0.0) or 0.0), 2),
+                }
+            )
+
+        return {
+            "start_date": start.strftime("%Y-%m-%d"),
+            "end_date_exclusive": end.strftime("%Y-%m-%d"),
+            "days": max(1, int((end - start).total_seconds() // 86400)),
+            "transaction_count": len(selected),
+            "total_debit": round(debit, 2),
+            "total_credit": round(credit, 2),
+            "net_cashflow": round(credit - debit, 2),
+            "top_debit_categories": top_categories,
+            "transactions": transactions,
+        }
+
     async def semantic_context(self, user_id: str, query: str, limit: int = 6) -> List[Dict[str, Any]]:
         memory_docs = await self.db.assistant_memories.find({"user_id": user_id}).sort("created_at", -1).limit(300).to_list(300)
         knowledge_docs = await self.db.assistant_knowledge.find({}).sort("created_at", -1).limit(300).to_list(300)
@@ -325,11 +391,141 @@ class AssistantTools:
             return "example_driven"
         return "balanced"
 
+    def _try_parse_date_token(self, token: str, now: datetime) -> datetime | None:
+        cleaned = token.strip().lower().replace(",", " ")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned:
+            return None
+
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y"):
+            try:
+                return datetime.strptime(cleaned, fmt)
+            except Exception:
+                pass
+
+        for fmt in ("%d-%m-%y", "%d/%m/%y", "%m/%d/%y"):
+            try:
+                return datetime.strptime(cleaned, fmt)
+            except Exception:
+                pass
+
+        for fmt in ("%b %d %Y", "%B %d %Y", "%d %b %Y", "%d %B %Y"):
+            try:
+                return datetime.strptime(cleaned.title(), fmt)
+            except Exception:
+                pass
+
+        for fmt in ("%b %d", "%B %d", "%d %b", "%d %B"):
+            try:
+                parsed = datetime.strptime(cleaned.title(), fmt)
+                return parsed.replace(year=now.year)
+            except Exception:
+                pass
+
+        return None
+
+    def extract_time_range(self, message: str) -> Dict[str, Any]:
+        now = datetime.utcnow()
+        text = (message or "").strip().lower()
+        start: datetime | None = None
+        end: datetime | None = None
+        label = "last_45_days"
+        explicit = False
+
+        if "today" in text:
+            start = datetime(now.year, now.month, now.day)
+            end = start + timedelta(days=1)
+            label = "today"
+            explicit = True
+        elif "yesterday" in text:
+            end = datetime(now.year, now.month, now.day)
+            start = end - timedelta(days=1)
+            label = "yesterday"
+            explicit = True
+        elif "this week" in text:
+            start = datetime(now.year, now.month, now.day) - timedelta(days=now.weekday())
+            end = now
+            label = "this_week"
+            explicit = True
+        elif "last week" in text or "previous week" in text:
+            end = now
+            start = now - timedelta(days=7)
+            label = "last_week"
+            explicit = True
+        elif "last two week" in text or "last 2 week" in text or "past 2 week" in text:
+            end = now
+            start = now - timedelta(days=14)
+            label = "last_2_weeks"
+            explicit = True
+        elif "this month" in text:
+            start = datetime(now.year, now.month, 1)
+            end = now
+            label = "this_month"
+            explicit = True
+        elif "last month" in text or "previous month" in text:
+            current_month_start = datetime(now.year, now.month, 1)
+            prev_month_anchor = current_month_start - timedelta(days=1)
+            start = datetime(prev_month_anchor.year, prev_month_anchor.month, 1)
+            end = current_month_start
+            label = "last_month"
+            explicit = True
+        else:
+            match = re.search(r"last\s+(\d+)\s+(day|days|week|weeks|month|months)", text)
+            if match:
+                value = int(match.group(1))
+                unit = match.group(2)
+                days = value
+                if "week" in unit:
+                    days = value * 7
+                elif "month" in unit:
+                    days = value * 30
+                end = now
+                start = now - timedelta(days=days)
+                label = f"last_{value}_{unit}"
+                explicit = True
+
+        date_tokens = re.findall(
+            r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,\s*\d{2,4})?)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        parsed_dates: List[datetime] = []
+        for token in date_tokens[:3]:
+            parsed = self._try_parse_date_token(token, now=now)
+            if parsed:
+                parsed_dates.append(parsed)
+
+        if len(parsed_dates) >= 2:
+            parsed_dates.sort()
+            start = datetime(parsed_dates[0].year, parsed_dates[0].month, parsed_dates[0].day)
+            end = datetime(parsed_dates[1].year, parsed_dates[1].month, parsed_dates[1].day) + timedelta(days=1)
+            label = "custom_date_range"
+            explicit = True
+        elif len(parsed_dates) == 1:
+            only = parsed_dates[0]
+            start = datetime(only.year, only.month, only.day)
+            end = start + timedelta(days=1)
+            label = "single_date"
+            explicit = True
+
+        if not start or not end:
+            start = now - timedelta(days=45)
+            end = now
+
+        return {
+            "explicit": explicit,
+            "label": label,
+            "start_iso": start.isoformat(),
+            "end_iso": end.isoformat(),
+            "window_days": max(1, int((end - start).total_seconds() // 86400)),
+        }
+
     def finance_query_focus(self, message: str) -> Dict[str, Any]:
         text = (message or "").strip().lower()
         focus: List[str] = []
+        explicit_cashflow = any(token in text for token in ["net cashflow", "cashflow", "cash flow", "income vs expense"])
         rules = [
-            ("cashflow", ["cash flow", "cashflow", "net", "income vs expense"]),
+            ("cashflow", ["cash flow", "cashflow", "income vs expense"]),
             ("spending_trend", ["trend", "month over month", "pattern"]),
             ("category_breakdown", ["category", "breakdown", "where i spend", "spent most"]),
             ("anomalies", ["anomaly", "unusual", "outlier", "suspicious", "unexpected"]),
@@ -337,17 +533,24 @@ class AssistantTools:
             ("savings_actions", ["save", "reduce", "cut", "optimize", "improve"]),
             ("goal_progress", ["goal", "target", "progress"]),
             ("education", ["what is", "meaning", "explain"]),
+            ("transaction_summary", ["transaction", "transactions", "summary", "history", "debit", "credit"]),
         ]
         for name, keys in rules:
             if any(key in text for key in keys):
                 focus.append(name)
 
         if not focus:
-            focus = ["cashflow", "savings_actions"]
+            focus = ["savings_actions"]
 
-        money_hits = re.findall(r"(?:rs\.?|inr|\$|₹)\s*([0-9]+(?:\.[0-9]+)?)", text, flags=re.IGNORECASE)
+        time_range = self.extract_time_range(message)
+        if bool(time_range.get("explicit")) and "transaction_summary" not in focus:
+            focus.append("transaction_summary")
+
+        money_hits = re.findall(r"(?:rs\.?|inr|\$|\u20B9)\s*([0-9]+(?:\.[0-9]+)?)", text, flags=re.IGNORECASE)
         return {
-            "focus": focus[:4],
+            "focus": focus[:5],
+            "explicit_cashflow_request": explicit_cashflow,
+            "time_range": time_range,
             "has_amount_constraint": bool(money_hits),
             "amount_values": [float(match) for match in money_hits[:4]],
         }

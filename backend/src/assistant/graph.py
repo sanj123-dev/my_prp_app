@@ -24,6 +24,7 @@ class AssistantGraphState(TypedDict, total=False):
     citations: List[Dict[str, Any]]
     financial_snapshot: Dict[str, Any]
     analytics_report: Dict[str, Any]
+    transaction_summary: Dict[str, Any]
     user_profile: Dict[str, Any]
     analysis: str
     response: str
@@ -122,7 +123,21 @@ class AssistantGraph:
         except Exception:
             if any(
                 word in lowered
-                for word in ["how much", "spent", "balance", "total", "last month", "trend", "analytics", "compare"]
+                for word in [
+                    "how much",
+                    "spent",
+                    "balance",
+                    "total",
+                    "last month",
+                    "trend",
+                    "analytics",
+                    "compare",
+                    "transaction",
+                    "summary",
+                    "last week",
+                    "date",
+                    "history",
+                ]
             ):
                 intent = "data_query"
             elif any(word in lowered for word in ["what is", "explain", "meaning", "learn"]):
@@ -205,42 +220,59 @@ class AssistantGraph:
         context = state.get("retrieved_context", "")
         intent = state.get("intent", "planning")
         query_focus = state.get("query_focus", {})
+        focus_list = list(query_focus.get("focus", []))
+        time_range = dict(query_focus.get("time_range", {}))
+        explicit_cashflow = bool(query_focus.get("explicit_cashflow_request", False))
         trace = list(state.get("agent_trace", []))
 
         snapshot = await self.tools.financial_snapshot(user_id=user_id, days=45)
         analytics = await self.tools.analytics_report(user_id=user_id, days=90)
+        tx_summary: Dict[str, Any] = {}
+        if "transaction_summary" in focus_list or bool(time_range.get("explicit")):
+            tx_summary = await self.tools.transaction_summary(
+                user_id=user_id,
+                start_iso=str(time_range.get("start_iso", "")),
+                end_iso=str(time_range.get("end_iso", "")),
+                limit=14,
+            )
+
         prompt = ChatPromptTemplate.from_messages(
             [
                 (
                     "system",
                     "You are a senior financial analyst assistant. "
                     "Use provided metrics exactly. Prioritize trend insight and practical explanation. "
-                    "Avoid repeating only net cashflow unless the user explicitly asked for it.",
+                    "Do not mention net cashflow unless explicit_cashflow_request is true.",
                 ),
                 (
                     "human",
                     "Intent: {intent}\n"
+                    "explicit_cashflow_request: {explicit_cashflow}\n"
                     "Query focus: {query_focus}\n"
                     "User message:\n{message}\n\n"
                     "Financial snapshot:\n{snapshot}\n\n"
                     "Analytics report:\n{analytics}\n\n"
+                    "Transaction summary (for requested range):\n{tx_summary}\n\n"
                     "Retrieved context:\n{context}\n\n"
-                    "Return a concise analysis with:\n"
+                    "Return an analysis with:\n"
                     "1) direct answer to user ask\n"
-                    "2) strongest metric for requested focus\n"
+                    "2) strongest metrics for requested focus\n"
                     "3) trend direction\n"
                     "4) one action the user can choose.\n"
-                    "If focus includes category_breakdown/anomalies/velocity_7d/goal_progress, prioritize those over generic net cashflow.",
+                    "If focus includes transaction_summary, summarize requested date range and mention totals/count/categories.\n"
+                    "If no transactions are found, say that clearly and suggest adjusting the date range.",
                 ),
             ]
         )
         response = await (prompt | self.llm).ainvoke(
             {
                 "intent": intent,
+                "explicit_cashflow": explicit_cashflow,
                 "query_focus": json.dumps(query_focus),
                 "message": message,
                 "snapshot": json.dumps(snapshot),
                 "analytics": json.dumps(analytics),
+                "tx_summary": json.dumps(tx_summary),
                 "context": context,
             }
         )
@@ -248,6 +280,7 @@ class AssistantGraph:
         return {
             "financial_snapshot": snapshot,
             "analytics_report": analytics,
+            "transaction_summary": tx_summary,
             "analysis": str(response.content).strip(),
             "agent_trace": trace,
         }
@@ -260,6 +293,7 @@ class AssistantGraph:
         analysis = state.get("analysis", "")
         snapshot = state.get("financial_snapshot", {})
         analytics = state.get("analytics_report", {})
+        tx_summary = state.get("transaction_summary", {})
         profile = state.get("user_profile", {})
         daily_checkin = bool(state.get("daily_checkin", False))
         goal_change = bool(state.get("goal_change", False))
@@ -299,14 +333,17 @@ class AssistantGraph:
                     "User profile context: {profile}\n\n"
                     "Financial snapshot: {snapshot}\n\n"
                     "Analytics report: {analytics}\n\n"
+                    "Transaction summary: {tx_summary}\n\n"
                     "Analysis draft: {analysis}\n\n"
                     "Retrieved context: {context}\n\n"
                     "Output format:\n"
                     "- Use \\u20B9 for money values.\n"
-                    "- Normal response: 2-5 short sentences and one gentle follow-up question.\n"
-                    "- If intent=data_query, include at least one trend insight.\n"
+                    "- Normal response: adapt length to user need (brief for simple ask, detailed for complex ask).\n"
+                    "- If intent=data_query, include trend insight only when relevant.\n"
                     "- If dissatisfied=true, start with a short apology and then provide a fresher style response.\n"
-                    "- Avoid repeating the phrase 'net cash flow' unless explicitly requested.\n"
+                    "- Do not lead with net cashflow unless user explicitly asked for it.\n"
+                    "- If transaction_summary has data, prioritize it when user asked for time/date transaction summary.\n"
+                    "- Follow-up question is optional; ask only when it adds value.\n"
                     "- If daily_checkin is true, use 4 short lines:\n"
                     "1) greeting with user's name\n"
                     "2) quick status update tied to goal\n"
@@ -332,6 +369,7 @@ class AssistantGraph:
                 "profile": json.dumps(profile),
                 "snapshot": json.dumps(snapshot),
                 "analytics": json.dumps(analytics),
+                "tx_summary": json.dumps(tx_summary),
                 "analysis": analysis,
                 "context": context,
             }
@@ -369,9 +407,11 @@ class AssistantGraph:
                     "- No password/OTP content.\n"
                     "- Use \\u20B9 for money.\n"
                     "- If daily_checkin=true: return exactly 4 short lines in required structure.\n"
-                    "- Else: 2-5 short sentences + one gentle follow-up question.\n"
+                    "- Else: adapt response length to user ask. Do not force fixed sentence count.\n"
                     "- If dissatisfied=true include a brief apology and ensure wording is clearly different from repetitive style.\n"
-                    "- Prefer metrics aligned with query_focus over generic net cashflow.\n"
+                    "- Prefer metrics aligned with query_focus and transaction date range.\n"
+                    "- Do not mention net cashflow unless explicit_cashflow_request is true.\n"
+                    "- Follow-up question is optional, not mandatory.\n"
                     "- If needs_disclaimer=true include this exact sentence:\n"
                     "I can share general information, but for legal or regulated financial decisions, please consult a licensed professional.\n"
                     "- If goal_change=true include this exact sentence:\n"
@@ -383,6 +423,7 @@ class AssistantGraph:
                     "Language: {language}\n"
                     "User message: {message}\n"
                     "query_focus: {query_focus}\n"
+                    "explicit_cashflow_request: {explicit_cashflow}\n"
                     "daily_checkin: {daily_checkin}\n"
                     "goal_change: {goal_change}\n"
                     "needs_disclaimer: {needs_disclaimer}\n\n"
@@ -398,6 +439,7 @@ class AssistantGraph:
                     "language": language,
                     "message": message,
                     "query_focus": json.dumps(query_focus),
+                    "explicit_cashflow": bool(query_focus.get("explicit_cashflow_request", False)),
                     "daily_checkin": daily_checkin,
                     "goal_change": goal_change,
                     "needs_disclaimer": needs_disclaimer,
