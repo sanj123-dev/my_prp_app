@@ -105,6 +105,8 @@ class IntentDetectionAgent(BaseAgent):
         state["user_tone"] = tone
         state["query_focus"] = focus
         state["dissatisfied"] = ctx.tools.detect_dissatisfaction(message)
+        time_label = str(((focus.get("time_range") or {}).get("label", "")) or "")
+        state["show_net_cashflow"] = bool(focus.get("explicit_cashflow_request", False)) or time_label == "this_month"
         self._trace(state, f"{self.name}:{intent}")
         return state
 
@@ -233,6 +235,7 @@ class PlannerAgent(BaseAgent):
         plan: List[str] = [
             "ingestion",
             "categorization",
+            "transaction_query",
             "expense",
             "budget",
             "forecasting",
@@ -258,7 +261,7 @@ class PlannerAgent(BaseAgent):
         if intent == "education_request":
             plan = ["learning", "financial_health", "synthesizer"]
         elif intent == "emotional_spending":
-            plan = ["expense", "behaviour", "sentiment", "budget", "learning", "financial_health", "synthesizer"]
+            plan = ["transaction_query", "expense", "behaviour", "sentiment", "budget", "learning", "financial_health", "synthesizer"]
 
         anomalies = list(user_state.get("anomalies", []))
         if len(anomalies) >= 3:
@@ -319,6 +322,33 @@ class CategorizationAgent(BaseAgent):
             "merchant_detection": "heuristic",
         }
         self._trace(state, self.name)
+        return state
+
+
+class TransactionQueryAgent(BaseAgent):
+    name = "transaction_query"
+
+    async def run(self, state: Dict[str, Any], ctx: AgentContext) -> Dict[str, Any]:
+        query_focus = dict(state.get("query_focus", {}))
+        focus_list = list(query_focus.get("focus", []))
+        time_range = dict(query_focus.get("time_range", {}))
+        intent = str(state.get("intent", "general"))
+        message = str(state.get("message", "")).lower()
+
+        needs_tx = "transaction_summary" in focus_list or bool(time_range.get("explicit", False))
+        if not needs_tx and intent == "expense_question":
+            needs_tx = any(token in message for token in ["transaction", "history", "debit", "credit", "spent"])
+
+        report: Dict[str, Any] = {}
+        if needs_tx:
+            report = await ctx.tools.transaction_summary(
+                user_id=str(state.get("user_id", "")),
+                start_iso=str(time_range.get("start_iso", "")),
+                end_iso=str(time_range.get("end_iso", "")),
+                limit=20,
+            )
+        state["transaction_report"] = report
+        self._trace(state, f"{self.name}:{int(report.get('transaction_count', 0) or 0)}")
         return state
 
 
@@ -545,7 +575,9 @@ class SynthesizerAgent(BaseAgent):
                     "Write like a smart, warm coach. Never sound robotic or repetitive. "
                     "Adapt tone using user_tone and mood_label: "
                     "supportive when stressed, crisp when urgent, curious when user is curious. "
-                    "Do not mention net cashflow unless explicit_cashflow_request is true. "
+                    "Do not mention net cashflow unless show_net_cashflow is true. "
+                    "For transaction questions, use transaction_report values exactly and never invent counts/totals. "
+                    "If transaction_report has entries, include a small markdown table (up to 5 rows). "
                     "If intent is investment_question, be especially engaging: "
                     "explain readiness clearly, show 2-3 practical options, and ask one follow-up question. "
                     "For all intents, return: "
@@ -558,10 +590,12 @@ class SynthesizerAgent(BaseAgent):
                     "User message: {message}\nIntent: {intent}\nLanguage: {language}\n"
                     "User tone: {user_tone}\nMood: {mood_label}\nDissatisfied: {dissatisfied}\n"
                     "explicit_cashflow_request: {explicit_cashflow_request}\n"
+                    "show_net_cashflow: {show_net_cashflow}\n"
                     "User state: {user_state}\n"
                     "Expense report: {expense}\nBudget report: {budget}\nForecast: {forecast}\n"
                     "Behaviour: {behaviour}\nSentiment: {sentiment}\nInvestment: {investment}\n"
-                    "Learning: {learning}\nFinancial health: {health}",
+                    "Learning: {learning}\nFinancial health: {health}\n"
+                    "Transaction report: {transaction_report}",
                 ),
             ]
         )
@@ -576,6 +610,7 @@ class SynthesizerAgent(BaseAgent):
                     "mood_label": (state.get("sentiment_report", {}) or {}).get("mood_label", "calm"),
                     "dissatisfied": bool(state.get("dissatisfied", False)),
                     "explicit_cashflow_request": bool((state.get("query_focus", {}) or {}).get("explicit_cashflow_request", False)),
+                    "show_net_cashflow": bool(state.get("show_net_cashflow", False)),
                     "user_state": json.dumps(state.get("user_state", {})),
                     "expense": json.dumps(state.get("expense_report", {})),
                     "budget": json.dumps(state.get("budget_report", {})),
@@ -585,13 +620,14 @@ class SynthesizerAgent(BaseAgent):
                     "investment": json.dumps(state.get("investment_report", {})),
                     "learning": json.dumps(state.get("learning_report", {})),
                     "health": json.dumps(state.get("financial_health_report", {})),
+                    "transaction_report": json.dumps(state.get("transaction_report", {})),
                 }
             )
             text = str(resp.content).strip()
         except Exception:
             text = self._fallback_summary(state)
 
-        if not bool((state.get("query_focus", {}) or {}).get("explicit_cashflow_request", False)):
+        if not bool(state.get("show_net_cashflow", False)):
             text = re.sub(r"(?im)^.*\bnet cashflow\b.*$", "", text)
             text = re.sub(r"(?im)^.*\bprojected_net\b.*$", "", text)
             text = re.sub(r"\n{3,}", "\n\n", text).strip()
@@ -609,6 +645,7 @@ class SynthesizerAgent(BaseAgent):
         health = dict(state.get("financial_health_report", {}))
         budget = dict(state.get("budget_report", {}))
         forecast = dict(state.get("forecast_report", {}))
+        tx = dict(state.get("transaction_report", {}))
         mood = str(sentiment.get("mood_label", "calm"))
         intro = "You are on the right track."
         if mood == "support_needed":
@@ -624,6 +661,19 @@ class SynthesizerAgent(BaseAgent):
                 "- Next action: decide your horizon and monthly amount, then start with a low-risk base.\n"
                 f"- {investment.get('engagement_hook', 'Want me to build a step-by-step beginner plan?')}"
             )
+        tx_count = int(tx.get("transaction_count", 0) or 0)
+        if tx_count > 0:
+            lines = [
+                f"{intro}",
+                f"- Transactions found: {tx_count} in {tx.get('start_date', '')} to {tx.get('end_date_exclusive', '')}.",
+                f"- Debit: \u20B9{float(tx.get('total_debit', 0) or 0):,.0f}, Credit: \u20B9{float(tx.get('total_credit', 0) or 0):,.0f}.",
+            ]
+            if bool(state.get("show_net_cashflow", False)):
+                lines.append(f"- Net cashflow: \u20B9{float(tx.get('net_cashflow', 0) or 0):,.0f}.")
+            lines.append("Here are recent transactions:")
+            lines.append(self._format_transaction_table(tx))
+            lines.append("- Want me to break this down by category and suggest one optimization?")
+            return "\n".join(lines)
         return (
             f"{intro}\n"
             f"- Overall health score: {health.get('overall_health_score', 0)} ({health.get('health_band', 'watch')}).\n"
@@ -632,6 +682,22 @@ class SynthesizerAgent(BaseAgent):
             "- Next action: review top 2 spending categories and set one cap for this week.\n"
             "- Want a focused 7-day action plan?"
         )
+
+    def _format_transaction_table(self, tx: Dict[str, Any]) -> str:
+        rows = list(tx.get("transactions", []))[:5]
+        if not rows:
+            return "_No transactions in this range._"
+        table = [
+            "| Date | Description | Category | Type | Amount |",
+            "|---|---|---|---|---:|",
+        ]
+        for item in rows:
+            desc = str(item.get("description", "")).replace("|", " ").strip()[:30]
+            cat = str(item.get("category", "Other")).replace("|", " ").strip()
+            typ = str(item.get("transaction_type", "debit")).strip()
+            amt = float(item.get("amount", 0) or 0)
+            table.append(f"| {item.get('date', '')} | {desc} | {cat} | {typ} | \u20B9{amt:,.0f} |")
+        return "\n".join(table)
 
 
 class HumanReviewAgent(BaseAgent):
@@ -711,6 +777,7 @@ class AssistantOrchestrator:
         self.agents: Dict[str, AssistantAgent] = {
             "ingestion": IngestionAgent(),
             "categorization": CategorizationAgent(),
+            "transaction_query": TransactionQueryAgent(),
             "expense": ExpenseAgent(),
             "budget": BudgetAgent(),
             "forecasting": ForecastingAgent(),
