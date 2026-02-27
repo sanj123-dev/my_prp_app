@@ -55,6 +55,7 @@ class GoalPlan(BaseModel):
     household_context: Dict[str, Any] = Field(default_factory=dict)
     prerequisites: List[GoalPrerequisite] = Field(default_factory=list)
     flow_steps: List[Dict[str, Any]] = Field(default_factory=list)
+    actionable_insights: List[str] = Field(default_factory=list)
     summary: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -75,4 +76,3 @@ class GoalPlannerProgress(BaseModel):
     assistant_message: str
     question: Optional[GoalPlannerQuestion] = None
     completed_plan: Optional[GoalPlan] = None
-

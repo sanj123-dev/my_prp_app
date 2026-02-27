@@ -69,6 +69,10 @@ export default function SavingsGoalsScreen() {
       : payload.assistant_message;
     setChat((prev) => {
       const base = resetChat ? [] : prev;
+      const last = base.length > 0 ? base[base.length - 1] : null;
+      if (last && last.role === 'assistant' && last.text.trim() === assistantText.trim()) {
+        return base;
+      }
       return [
         ...base,
         {
@@ -216,6 +220,7 @@ export default function SavingsGoalsScreen() {
           {latestPlan ? (
             <View style={styles.planCard}>
               <Text style={styles.planTitle}>Generated Plan: {latestPlan.goal_name}</Text>
+              <Text style={[styles.planLine, { marginBottom: 8 }]}>{latestPlan.summary}</Text>
               <Text style={styles.planLine}>Required monthly: {'\u20B9'}{latestPlan.required_monthly_for_goal.toFixed(0)}</Text>
               <Text style={styles.planLine}>Recommended monthly: {'\u20B9'}{latestPlan.monthly_budget_recommended.toFixed(0)}</Text>
               <Text style={styles.planLine}>
@@ -227,6 +232,16 @@ export default function SavingsGoalsScreen() {
                   {latestPlan.prerequisites.map((item) => (
                     <Text key={item.id} style={styles.planLine}>
                       - {item.title} - {'\u20B9'}{item.suggested_monthly_allocation.toFixed(0)}/mo for ~{item.estimated_months} months
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+              {latestPlan.actionable_insights.length > 0 ? (
+                <View style={{ marginTop: 10 }}>
+                  <Text style={styles.planSubTitle}>Actionable Insights</Text>
+                  {latestPlan.actionable_insights.map((item, index) => (
+                    <Text key={`${item}-${index}`} style={styles.planLine}>
+                      - {item}
                     </Text>
                   ))}
                 </View>

@@ -18,12 +18,45 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import {
-  ExpoSpeechRecognitionModule,
-  useSpeechRecognitionEvent,
-} from 'expo-speech-recognition';
 import * as Speech from 'expo-speech';
 import { format } from 'date-fns';
+
+type SpeechRecognitionModuleShape = {
+  requestPermissionsAsync: () => Promise<{ granted: boolean; canAskAgain?: boolean }>;
+  start: (options: Record<string, unknown>) => Promise<void>;
+  stop: () => Promise<void>;
+};
+
+type SpeechRecognitionEventHook = (eventName: string, callback: (event: any) => void) => void;
+
+const speechRecognitionPkg:
+  | {
+      ExpoSpeechRecognitionModule?: SpeechRecognitionModuleShape;
+      useSpeechRecognitionEvent?: SpeechRecognitionEventHook;
+    }
+  | undefined = (() => {
+  try {
+    // Lazy require prevents app crash when native module is unavailable (Expo Go / missing prebuild).
+    return require('expo-speech-recognition');
+  } catch (_error) {
+    return undefined;
+  }
+})();
+
+const speechRecognitionAvailable = !!speechRecognitionPkg?.ExpoSpeechRecognitionModule;
+
+const ExpoSpeechRecognitionModule: SpeechRecognitionModuleShape =
+  speechRecognitionPkg?.ExpoSpeechRecognitionModule ?? {
+    requestPermissionsAsync: async () => ({ granted: false, canAskAgain: false }),
+    start: async () => {
+      throw new Error('expo-speech-recognition native module unavailable');
+    },
+    stop: async () => {},
+  };
+
+const useSpeechRecognitionEvent: SpeechRecognitionEventHook =
+  speechRecognitionPkg?.useSpeechRecognitionEvent ??
+  ((_eventName: string, _callback: (event: any) => void) => {});
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const EXPO_PUBLIC_VOICE_WS_URL = process.env.EXPO_PUBLIC_VOICE_WS_URL;
@@ -701,6 +734,14 @@ export default function Chat() {
     if (!assistantVisible || !assistantMicPrimed || sending || isVoiceSubmittingRef.current) return;
     if (assistantListening) return;
     if (startInFlightRef.current) return;
+    if (!speechRecognitionAvailable) {
+      setAssistantStatus('Voice recognition module not available in this build.');
+      Alert.alert(
+        'Voice Unavailable',
+        'This build does not include speech recognition native module. You can still use text chat.'
+      );
+      return;
+    }
     startInFlightRef.current = true;
     if (assistantSpeaking) {
       await Speech.stop();
@@ -854,6 +895,14 @@ export default function Chat() {
   };
 
   const primeAssistantMic = async () => {
+    if (!speechRecognitionAvailable) {
+      setAssistantStatus('Voice recognition module not available in this build.');
+      Alert.alert(
+        'Voice Unavailable',
+        'Speech recognition is unavailable in this app build. Use text chat or a custom dev build with native modules.'
+      );
+      return;
+    }
     setAssistantMicPrimed(true);
     setAssistantStatus('Starting microphone...');
     setTimeout(() => {

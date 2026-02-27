@@ -104,6 +104,7 @@ class IntentDetectionAgent(BaseAgent):
         state["intent"] = intent
         state["user_tone"] = tone
         state["query_focus"] = focus
+        state["dissatisfied"] = ctx.tools.detect_dissatisfaction(message)
         self._trace(state, f"{self.name}:{intent}")
         return state
 
@@ -414,10 +415,18 @@ class SentimentAgent(BaseAgent):
         tone = str(state.get("user_tone", "neutral"))
         emotional = any(k in message for k in ["stress", "panic", "sad", "frustrated", "overwhelmed", "impulse"])
         score = 0.75 if emotional or tone in {"stressed", "urgent"} else 0.35
+        mood_label = "calm"
+        if tone in {"stressed", "urgent"} or emotional:
+            mood_label = "support_needed"
+        elif tone in {"curious"}:
+            mood_label = "curious"
+        elif tone in {"casual"}:
+            mood_label = "casual"
         state["sentiment_report"] = {
             "emotional_spending_flag": emotional,
             "stress_spending_flag": tone in {"stressed", "urgent"} or emotional,
             "confidence_score": round(score, 2),
+            "mood_label": mood_label,
         }
         self._trace(state, self.name)
         return state
@@ -428,6 +437,9 @@ class InvestmentAgent(BaseAgent):
 
     async def run(self, state: Dict[str, Any], ctx: AgentContext) -> Dict[str, Any]:
         user_state = dict(state.get("user_state", {}))
+        intent = str(state.get("intent", "general"))
+        sentiment = dict(state.get("sentiment_report", {}))
+        mood = str(sentiment.get("mood_label", "calm"))
         cash = dict(user_state.get("cash_flow", {}))
         net = float(cash.get("net", 0.0) or 0.0)
         risk = str(user_state.get("risk_profile", "moderate"))
@@ -436,11 +448,24 @@ class InvestmentAgent(BaseAgent):
         alloc = "60/30/10 (core/diversified/learning bucket)"
         if risk == "conservative":
             alloc = "70/20/10 (safer/diversified/learning bucket)"
+        readiness_reason = "negative_or_zero_surplus"
+        if readiness == "emergency_fund_first":
+            readiness_reason = "surplus_exists_but_buffer_thin"
+        elif readiness == "ready_to_explore":
+            readiness_reason = "positive_surplus_and_stability"
+
+        engagement_hook = "Would you like a conservative, balanced, or growth-oriented sample roadmap?"
+        if mood == "support_needed":
+            engagement_hook = "Want me to keep this very low-risk and explain it in simple steps?"
+        if intent != "investment_question":
+            engagement_hook = "If you want, I can also show how this fits your current goal timeline."
         state["investment_report"] = {
             "investable_surplus": round(surplus, 2),
             "risk_score": risk,
             "readiness": readiness,
+            "readiness_reason": readiness_reason,
             "illustrative_allocation": alloc,
+            "engagement_hook": engagement_hook,
             "advice_disclaimer": "informational_only_not_financial_advice",
         }
         self._trace(state, self.name)
@@ -516,13 +541,23 @@ class SynthesizerAgent(BaseAgent):
             [
                 (
                     "system",
-                    "You are a financial assistant synthesizer. Create a concise, practical response with: "
-                    "1) answer, 2) key insights, 3) recommendations, 4) next actions. "
+                    "You are a highly engaging financial assistant synthesizer. "
+                    "Write like a smart, warm coach. Never sound robotic or repetitive. "
+                    "Adapt tone using user_tone and mood_label: "
+                    "supportive when stressed, crisp when urgent, curious when user is curious. "
+                    "Do not mention net cashflow unless explicit_cashflow_request is true. "
+                    "If intent is investment_question, be especially engaging: "
+                    "explain readiness clearly, show 2-3 practical options, and ask one follow-up question. "
+                    "For all intents, return: "
+                    "1) direct answer, 2) strongest insight, 3) practical next action. "
+                    "End with one short follow-up question when it helps continue the conversation. "
                     "Do not provide regulated investment advice. Use currency symbol \\u20B9 for amounts.",
                 ),
                 (
                     "human",
                     "User message: {message}\nIntent: {intent}\nLanguage: {language}\n"
+                    "User tone: {user_tone}\nMood: {mood_label}\nDissatisfied: {dissatisfied}\n"
+                    "explicit_cashflow_request: {explicit_cashflow_request}\n"
                     "User state: {user_state}\n"
                     "Expense report: {expense}\nBudget report: {budget}\nForecast: {forecast}\n"
                     "Behaviour: {behaviour}\nSentiment: {sentiment}\nInvestment: {investment}\n"
@@ -537,6 +572,10 @@ class SynthesizerAgent(BaseAgent):
                     "message": state.get("message", ""),
                     "intent": state.get("intent", "general"),
                     "language": state.get("language", "English"),
+                    "user_tone": state.get("user_tone", "neutral"),
+                    "mood_label": (state.get("sentiment_report", {}) or {}).get("mood_label", "calm"),
+                    "dissatisfied": bool(state.get("dissatisfied", False)),
+                    "explicit_cashflow_request": bool((state.get("query_focus", {}) or {}).get("explicit_cashflow_request", False)),
                     "user_state": json.dumps(state.get("user_state", {})),
                     "expense": json.dumps(state.get("expense_report", {})),
                     "budget": json.dumps(state.get("budget_report", {})),
@@ -552,6 +591,11 @@ class SynthesizerAgent(BaseAgent):
         except Exception:
             text = self._fallback_summary(state)
 
+        if not bool((state.get("query_focus", {}) or {}).get("explicit_cashflow_request", False)):
+            text = re.sub(r"(?im)^.*\bnet cashflow\b.*$", "", text)
+            text = re.sub(r"(?im)^.*\bprojected_net\b.*$", "", text)
+            text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
         text = re.sub(r"\bINR\b", "\u20B9", text, flags=re.IGNORECASE)
         text = re.sub(r"\bRs\.?\s*", "\u20B9", text, flags=re.IGNORECASE)
         state["synthesized_response"] = text
@@ -559,15 +603,34 @@ class SynthesizerAgent(BaseAgent):
         return state
 
     def _fallback_summary(self, state: Dict[str, Any]) -> str:
+        intent = str(state.get("intent", "general"))
+        sentiment = dict(state.get("sentiment_report", {}))
+        investment = dict(state.get("investment_report", {}))
         health = dict(state.get("financial_health_report", {}))
         budget = dict(state.get("budget_report", {}))
         forecast = dict(state.get("forecast_report", {}))
+        mood = str(sentiment.get("mood_label", "calm"))
+        intro = "You are on the right track."
+        if mood == "support_needed":
+            intro = "You are doing better than you think. We can keep this simple and safe."
+        if mood == "curious":
+            intro = "Great question. Here is the clearest path."
+
+        if intent == "investment_question":
+            return (
+                f"{intro}\n"
+                f"- Readiness: {investment.get('readiness', 'unknown')} ({investment.get('readiness_reason', 'context')}).\n"
+                f"- Suggested approach: {investment.get('illustrative_allocation', 'balanced staged allocation')}.\n"
+                "- Next action: decide your horizon and monthly amount, then start with a low-risk base.\n"
+                f"- {investment.get('engagement_hook', 'Want me to build a step-by-step beginner plan?')}"
+            )
         return (
-            "Here is your financial summary:\n"
+            f"{intro}\n"
             f"- Overall health score: {health.get('overall_health_score', 0)} ({health.get('health_band', 'watch')}).\n"
             f"- Budget model: 80/20, overspending={budget.get('overspending_detected', False)}.\n"
-            f"- Forecasted month-end net: \u20B9{forecast.get('projected_net', 0)}.\n"
-            "- Next action: review top 2 spending categories and set one cap for this week."
+            f"- Forecast: inflow \u20B9{forecast.get('projected_inflow', 0)} vs outflow \u20B9{forecast.get('projected_outflow', 0)}.\n"
+            "- Next action: review top 2 spending categories and set one cap for this week.\n"
+            "- Want a focused 7-day action plan?"
         )
 
 

@@ -63,6 +63,7 @@ export type GoalPlan = {
   household_context: Record<string, unknown>;
   prerequisites: GoalPrerequisite[];
   flow_steps: Record<string, unknown>[];
+  actionable_insights: string[];
   summary: string;
   created_at: string;
 };
@@ -118,4 +119,3 @@ export const getGoalPlans = async (userId: string, limit = 10): Promise<GoalPlan
     throw new Error(buildMessage(error, 'Unable to load goal plans'));
   }
 };
-
