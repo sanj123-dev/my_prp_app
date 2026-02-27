@@ -21,7 +21,7 @@ from passlib.context import CryptContext
 import requests
 
 from openai import AsyncOpenAI
-from src.goals import create_goal_router, init_goal_module
+from src.learn import create_learn_router, init_learn_module
 from src.assistant import create_assistant_router, init_assistant_module
 
 # ==================== INIT ====================
@@ -1970,7 +1970,7 @@ async def get_chat_history(user_id: str, limit: int = 50):
 # ==================== APP SETUP ====================
 
 app.include_router(api_router)
-app.include_router(create_goal_router(lambda: db), prefix="/api")
+app.include_router(create_learn_router(lambda: db), prefix="/api")
 app.include_router(create_assistant_router(lambda: db), prefix="/api")
 
 app.add_middleware(
@@ -1986,9 +1986,9 @@ logging.basicConfig(level=logging.INFO)
 @app.on_event("startup")
 async def startup_tasks():
     try:
-        await init_goal_module(db)
+        await init_learn_module(db)
     except Exception as error:
-        logging.exception("Goal module init failed at startup: %s", error)
+        logging.exception("Learn module init failed at startup: %s", error)
     try:
         await init_assistant_module(db)
     except Exception as error:

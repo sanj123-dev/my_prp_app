@@ -1,17 +1,36 @@
-# Multi-Agent Assistant (LangGraph)
+# Multi-Agent Assistant (Orchestrator Pattern)
 
 This module adds a separate advanced assistant under `/api/assistant/*`.
 
 ## Architecture
-- `router` agent: classifies intent (`data_query`, `planning`, `education`, `smalltalk`)
-- `retriever` agent: semantic retrieval across user memories, knowledge docs, and transactions
-- `analyst` agent: builds financial analysis from user snapshot + retrieved context
-- `coach` agent: final natural response with actionable guidance
+Execution pipeline follows a staged orchestrator flow:
 
-The runtime uses:
-- `langgraph` for multi-agent flow/state and session thread memory
-- `langchain` prompt composition
-- `langchain-openai` with Groq OpenAI-compatible endpoint
+1. `Orchestrator Entry`
+2. `Intent Detection Agent`
+3. `User State Agent`
+4. `Planner Agent`
+5. `Clarification Agent` (HITL #1 when required)
+6. Specialist execution layer:
+   - `Ingestion Agent`
+   - `Categorization Agent`
+   - `Expense Agent`
+   - `Budget Agent` (80/20 model)
+   - `Forecasting Agent`
+   - `Behaviour Agent`
+   - `Sentiment Agent`
+   - `Investment Agent` (readiness only, not advice)
+   - `Learning Agent`
+   - `Financial Health Agent`
+7. `Synthesizer Agent`
+8. `Human Review Agent` (HITL #2 when required)
+9. `Memory Update Agent`
+10. `Final Response Agent`
+
+Design notes:
+- SOLID-oriented separation: each agent has one focused responsibility.
+- Orchestrator coordinates order; agents remain independently testable.
+- Dependency injection: `db`, `llm`, and `tools` are passed via shared context.
+- Backward compatibility: `AssistantGraph.run()` output contract is unchanged.
 
 ## Endpoints
 - `POST /api/assistant/session/start`

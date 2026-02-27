@@ -16,7 +16,6 @@ export default function RootLayout() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="analytics" />
         <Stack.Screen name="profile" />
-        <Stack.Screen name="learn" />
         <Stack.Screen name="news/index" />
       </Stack>
     </SafeAreaProvider>
