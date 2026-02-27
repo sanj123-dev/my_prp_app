@@ -134,11 +134,14 @@ class UserStateAgent(BaseAgent):
         analytics_90 = await ctx.tools.analytics_report(user_id=user_id, days=90)
         profile = await ctx.tools.user_profile_summary(user_id=user_id)
         dialogue = await ctx.tools.recent_dialogue(user_id=user_id, session_id=session_id, limit=8)
+        all_time_dialogue = await ctx.tools.all_time_dialogue(user_id=user_id, limit=80)
+        conversation_profile = await ctx.tools.conversation_profile(user_id=user_id)
         prefs = await ctx.tools.user_style_preferences(user_id=user_id)
         sem_hits = await ctx.tools.semantic_context(user_id=user_id, query=message, limit=6)
         behaviour_profile = await ctx.tools.behaviour_profile(user_id=user_id, days=180)
 
-        response_style = ctx.tools.preferred_response_style(message=message, dialogue=dialogue)
+        dialogue_for_style = all_time_dialogue[-12:] if all_time_dialogue else dialogue
+        response_style = ctx.tools.preferred_response_style(message=message, dialogue=dialogue_for_style)
         preferred_style = str(prefs.get("style_preference", "balanced"))
         if response_style == "balanced" and preferred_style in {"concise", "detailed", "example_driven", "balanced"}:
             response_style = preferred_style
@@ -154,7 +157,7 @@ class UserStateAgent(BaseAgent):
         if credit > 0 and savings_rate > 35:
             lifecycle_stage = "stability"
 
-        sentiment_history = self._derive_sentiment_history(dialogue)
+        sentiment_history = self._derive_sentiment_history(all_time_dialogue or dialogue)
         risk_profile = self._derive_risk_profile(profile=profile, analytics=analytics_90, sentiment=sentiment_history)
 
         citations: List[Dict[str, Any]] = []
@@ -172,6 +175,8 @@ class UserStateAgent(BaseAgent):
         state["analytics_report"] = analytics_90
         state["user_profile"] = profile
         state["recent_dialogue"] = dialogue
+        state["all_time_dialogue"] = all_time_dialogue
+        state["conversation_profile"] = conversation_profile
         state["user_style_preferences"] = prefs
         state["response_style"] = response_style
         state["citations"] = citations
@@ -186,6 +191,8 @@ class UserStateAgent(BaseAgent):
             "anomalies": anomalies[:5],
             "lifecycle_stage": lifecycle_stage,
             "monthly_trend": monthly_trend,
+            "conversation_profile": conversation_profile,
+            "all_time_context_turns": len(all_time_dialogue),
         }
         self._trace(state, self.name)
         return state
@@ -697,24 +704,30 @@ class SynthesizerAgent(BaseAgent):
                     "Write like a smart, warm coach. Never sound robotic or repetitive. "
                     "Adapt tone using user_tone and mood_label: "
                     "supportive when stressed, crisp when urgent, curious when user is curious. "
+                    "Default response style: concise, useful, actionable. "
+                    "Default length: 2-5 short lines, usually <= 80 words. "
+                    "Only expand to a longer answer when user explicitly asks for detail, deep explanation, or step-by-step guidance. "
                     "Do not mention net cashflow unless show_net_cashflow is true. "
                     "For transaction questions, use transaction_report values exactly and never invent counts/totals. "
-                    "If transaction_report has entries, include a small markdown table (up to 5 rows). "
+                    "Do not auto-generate markdown tables unless user explicitly requests a table. "
                     "If intent is investment_question, be especially engaging: "
                     "explain readiness clearly, show 2-3 practical options, and ask one follow-up question. "
                     "Always include explainability naturally: why this advice fits this user, based on evidence. "
                     "Use engagement_report to keep the response human, motivating, and specific. "
                     "For all intents, return: "
-                    "1) direct answer, 2) strongest insight, 3) practical next action. "
+                    "1) direct answer, 2) strongest insight, 3) one practical next action. "
                     "End with one short follow-up question when it helps continue the conversation. "
                     "Do not provide regulated investment advice. Use currency symbol \\u20B9 for amounts.",
                 ),
                 (
                     "human",
                     "User message: {message}\nIntent: {intent}\nLanguage: {language}\n"
+                    "Response style preference: {response_style}\n"
                     "User tone: {user_tone}\nMood: {mood_label}\nDissatisfied: {dissatisfied}\n"
                     "explicit_cashflow_request: {explicit_cashflow_request}\n"
                     "show_net_cashflow: {show_net_cashflow}\n"
+                    "Conversation profile: {conversation_profile}\n"
+                    "All-time dialogue memory (recent excerpts): {all_time_dialogue}\n"
                     "User state: {user_state}\n"
                     "Expense report: {expense}\nBudget report: {budget}\nForecast: {forecast}\n"
                     "Behaviour: {behaviour}\nSentiment: {sentiment}\nInvestment: {investment}\n"
@@ -725,17 +738,28 @@ class SynthesizerAgent(BaseAgent):
             ]
         )
         text = ""
+        dialogue_excerpt = [
+            {
+                "role": str(item.get("role", "")),
+                "content": str(item.get("content", ""))[:140],
+            }
+            for item in list(state.get("all_time_dialogue", []))[-10:]
+            if str(item.get("role", "")).strip().lower() in {"user", "assistant"}
+        ]
         try:
             resp = await (prompt | ctx.llm).ainvoke(
                 {
                     "message": state.get("message", ""),
                     "intent": state.get("intent", "general"),
                     "language": state.get("language", "English"),
+                    "response_style": state.get("response_style", "concise"),
                     "user_tone": state.get("user_tone", "neutral"),
                     "mood_label": (state.get("sentiment_report", {}) or {}).get("mood_label", "calm"),
                     "dissatisfied": bool(state.get("dissatisfied", False)),
                     "explicit_cashflow_request": bool((state.get("query_focus", {}) or {}).get("explicit_cashflow_request", False)),
                     "show_net_cashflow": bool(state.get("show_net_cashflow", False)),
+                    "conversation_profile": json.dumps(state.get("conversation_profile", {})),
+                    "all_time_dialogue": json.dumps(dialogue_excerpt),
                     "user_state": json.dumps(state.get("user_state", {})),
                     "expense": json.dumps(state.get("expense_report", {})),
                     "budget": json.dumps(state.get("budget_report", {})),
@@ -893,9 +917,167 @@ class FinalResponseAgent(BaseAgent):
             if note:
                 response = f"{response}\n\n{note}\nReply 'approve' to continue or tell me what to change."
 
+        grounded = self._build_grounded_money_response(state)
+        if grounded:
+            response = grounded
+
+        response_style = str(state.get("response_style", "concise")).strip().lower()
+        allow_long = response_style in {"detailed", "example_driven"} or self._user_requested_detail(
+            str(state.get("message", ""))
+        )
+        response = self._normalize_money_phrasing(response)
+        response = self._shape_actionable_response(response, allow_long=allow_long)
+
         state["response"] = response
         self._trace(state, self.name)
         return state
+
+    def _user_requested_detail(self, message: str) -> bool:
+        lowered = (message or "").lower()
+        cues = [
+            "detailed",
+            "in detail",
+            "step by step",
+            "deep dive",
+            "explain deeply",
+            "full explanation",
+        ]
+        return any(cue in lowered for cue in cues)
+
+    def _shape_actionable_response(self, text: str, *, allow_long: bool) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return "I can help. What do you want to improve first?"
+
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not lines:
+            return raw
+
+        if not allow_long:
+            compact: List[str] = []
+            for line in lines:
+                if line.startswith("|"):
+                    continue
+                if line.endswith(":") and len(line) <= 42:
+                    continue
+                normalized = re.sub(r"\s+", " ", line).strip()
+                if normalized:
+                    compact.append(normalized)
+                if len(compact) >= 5:
+                    break
+
+            joined = "\n".join(compact).strip() or raw
+            words = joined.split()
+            if len(words) > 85:
+                joined = " ".join(words[:85]).strip() + "..."
+            return joined
+
+        cleaned = "\n".join(re.sub(r"\s+", " ", line).strip() for line in lines)
+        words = cleaned.split()
+        if len(words) > 180:
+            cleaned = " ".join(words[:180]).strip() + "..."
+        return cleaned
+
+    def _build_grounded_money_response(self, state: Dict[str, Any]) -> str:
+        if bool(state.get("needs_clarification", False)):
+            return ""
+
+        message = str(state.get("message", "")).lower()
+        intent = str(state.get("intent", "general")).strip().lower()
+        focus = list((state.get("query_focus", {}) or {}).get("focus", []))
+        asks_money = any(
+            token in message
+            for token in [
+                "amount",
+                "debit",
+                "credit",
+                "spent",
+                "spend",
+                "expense",
+                "cash flow",
+                "cashflow",
+                "income",
+                "balance",
+                "transaction",
+                "summary",
+            ]
+        )
+        needs_grounding = asks_money or intent in {"expense_question", "budget_question", "forecasting"} or "transaction_summary" in focus
+        if not needs_grounding:
+            return ""
+
+        show_net = bool(state.get("show_net_cashflow", False))
+        tx = dict(state.get("transaction_report", {}))
+        tx_count = int(tx.get("transaction_count", 0) or 0)
+        if tx_count > 0:
+            start_date = str(tx.get("start_date", "")).strip()
+            end_date = str(tx.get("end_date_exclusive", "")).strip()
+            debit = self._format_rupee(tx.get("total_debit", 0.0))
+            credit = self._format_rupee(tx.get("total_credit", 0.0))
+            parts = [f"Exact summary ({start_date} to {end_date}): {tx_count} transactions."]
+            if show_net:
+                parts.append(
+                    f"Debit {debit}, Credit {credit}, Net cashflow {self._format_rupee(tx.get('net_cashflow', 0.0))}."
+                )
+            else:
+                parts.append(f"Debit {debit}, Credit {credit}.")
+            top_categories = list(tx.get("top_debit_categories", []))
+            if top_categories:
+                top = top_categories[0]
+                parts.append(
+                    f"Top spend category: {top.get('name', 'Other')} ({self._format_rupee(top.get('amount', 0.0))})."
+                )
+            parts.append("Next action: review top 3 debit transactions and cap one high-variance category this week.")
+            return "\n".join(parts)
+
+        snapshot = dict(state.get("financial_snapshot", {}))
+        if int(snapshot.get("transaction_count", 0) or 0) <= 0:
+            return ""
+
+        debit = self._format_rupee(snapshot.get("total_debit", 0.0))
+        credit = self._format_rupee(snapshot.get("total_credit", 0.0))
+        line1 = f"Exact summary from your tracked data: Debit {debit}, Credit {credit}."
+        if show_net:
+            line1 = (
+                f"Exact summary from your tracked data: Debit {debit}, Credit {credit}, "
+                f"Net cashflow {self._format_rupee(snapshot.get('net_cashflow', 0.0))}."
+            )
+        line2 = (
+            f"This month: debit {self._format_rupee(snapshot.get('total_debit', 0.0))}, "
+            f"credit {self._format_rupee(snapshot.get('total_credit', 0.0))}."
+        )
+        top_categories = list(snapshot.get("top_categories", []))
+        if top_categories:
+            top = top_categories[0]
+            line3 = f"Top category now: {top.get('name', 'Other')} ({self._format_rupee(top.get('amount', 0.0))})."
+        else:
+            line3 = "Top category now: not enough data."
+        line4 = "Next action: set a weekly cap for your top category and track it daily."
+        return "\n".join([line1, line2, line3, line4])
+
+    def _normalize_money_phrasing(self, text: str) -> str:
+        normalized = re.sub(r"\bINR\b", "\u20B9", text or "", flags=re.IGNORECASE)
+        normalized = re.sub(r"\bRs\.?\s*", "\u20B9", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)", r"\u20B9\1", normalized)
+
+        def add_symbol(match: re.Match[str]) -> str:
+            label = str(match.group(1) or "")
+            number = str(match.group(2) or "")
+            return f"{label} \u20B9{number}"
+
+        normalized = re.sub(
+            r"(?i)\b(total|debit|credit|spent|spend|expense|expenses|income|cashflow|cash flow|balance|amount|outflow|inflow|net cashflow|net)\s*[:=]?\s*(?!\u20B9)([+-]?[0-9][0-9,]*(?:\.[0-9]+)?)",
+            add_symbol,
+            normalized,
+        )
+        return normalized
+
+    def _format_rupee(self, amount: Any) -> str:
+        try:
+            value = float(amount or 0.0)
+        except Exception:
+            value = 0.0
+        return f"\u20B9{value:,.2f}"
 
 
 class AssistantOrchestrator:

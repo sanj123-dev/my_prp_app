@@ -133,6 +133,7 @@ export default function Chat() {
   const startInFlightRef = useRef(false);
   const startTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousSpeakingRef = useRef(false);
+  const assistantUtteranceRef = useRef('');
 
   const getTranscriptFromEvent = (event: any): string => {
     const firstResult = event?.results?.[0];
@@ -377,6 +378,7 @@ export default function Chat() {
   const speakText = async (text: string, locale?: string) => {
     const cleaned = (text || '').trim();
     if (!cleaned) return;
+    assistantUtteranceRef.current = cleaned.toLowerCase();
 
     const resolveMaleVoice = async () => {
       const key = locale || 'default';
@@ -433,8 +435,8 @@ export default function Chat() {
         Speech.speak(cleaned, {
           language,
           voice: voiceId,
-          rate: 0.97,
-          pitch: 0.82,
+          rate: 0.84,
+          pitch: 0.86,
           volume: 1.0,
           onDone: () => resolve(true),
           onStopped: () => resolve(true),
@@ -446,6 +448,13 @@ export default function Chat() {
     setAssistantStatus('Speaking...');
     await Speech.stop();
 
+    // Keep mic open during speech so user can interrupt naturally.
+    if (assistantVisibleRef.current && assistantMicPrimed && !assistantListening) {
+      setTimeout(() => {
+        void startListening({ allowWhileSpeaking: true });
+      }, 120);
+    }
+
     let ok = await attemptSpeak(maleVoice.language || locale, maleVoice.id);
     if (!ok) {
       ok = await attemptSpeak(locale, undefined);
@@ -455,6 +464,7 @@ export default function Chat() {
     }
 
     setAssistantSpeaking(false);
+    assistantUtteranceRef.current = '';
     setAssistantStatus(ok ? 'Hands-free mode active. Speak anytime.' : 'Audio unavailable on this device.');
     if (assistantVisibleRef.current && !sending && !isVoiceSubmittingRef.current) {
       setTimeout(() => {
@@ -487,25 +497,33 @@ export default function Chat() {
       clearTimeout(startTimeoutRef.current);
       startTimeoutRef.current = null;
     }
-    if (assistantSpeaking) {
-      void Speech.stop();
-      setAssistantSpeaking(false);
-      void sendVoiceWs({ type: 'control.interrupt' });
-    }
     setAssistantListening(true);
-    setAssistantStatus('Listening...');
+    setAssistantStatus(assistantSpeaking ? 'Listening for interruption...' : 'Listening...');
     transcriptRef.current = '';
   });
 
   useSpeechRecognitionEvent('result', (event: any) => {
     const transcript = getTranscriptFromEvent(event);
     if (transcript) {
+      const normalizedTranscript = transcript.trim().toLowerCase();
+      if (!normalizedTranscript) return;
+
+      if (assistantSpeaking) {
+        const utterance = assistantUtteranceRef.current || '';
+        const looksLikeEcho =
+          normalizedTranscript.length >= 6 && utterance.includes(normalizedTranscript);
+        if (looksLikeEcho) {
+          return;
+        }
+      }
+
       transcriptRef.current = transcript;
       void sendVoiceWs({ type: 'user.text.partial', text: transcript });
       if (assistantSpeaking) {
         void Speech.stop();
         setAssistantSpeaking(false);
         void sendVoiceWs({ type: 'control.interrupt' });
+        setAssistantStatus('Interrupted. Listening...');
       }
       if (voiceSilenceTimerRef.current) {
         clearTimeout(voiceSilenceTimerRef.current);
@@ -897,8 +915,10 @@ export default function Chat() {
     }
   };
 
-  const startListening = async () => {
-    if (!assistantVisible || !assistantMicPrimed || sending || isVoiceSubmittingRef.current) return;
+  const startListening = async (options?: { allowWhileSpeaking?: boolean }) => {
+    const allowWhileSpeaking = Boolean(options?.allowWhileSpeaking);
+    if (!assistantVisible || !assistantMicPrimed || isVoiceSubmittingRef.current) return;
+    if (sending && !allowWhileSpeaking) return;
     if (assistantListening) return;
     if (startInFlightRef.current) return;
     if (!speechRecognitionAvailable) {
@@ -910,7 +930,7 @@ export default function Chat() {
       return;
     }
     startInFlightRef.current = true;
-    if (assistantSpeaking) {
+    if (assistantSpeaking && !allowWhileSpeaking) {
       await Speech.stop();
       setAssistantSpeaking(false);
     }
@@ -1025,6 +1045,7 @@ export default function Chat() {
           return;
         }
       });
+      setSending(false);
       if (answer) {
         if (usedHttpFallback) {
           appendLocalMessage('assistant', answer);
@@ -1098,43 +1119,13 @@ export default function Chat() {
     return (
       <View style={styles.assistantContent}>
         {lines.map((line, index) => {
-          const isBullet = /^[-*]\s+/.test(line);
-          const bulletText = line.replace(/^[-*]\s+/, '');
-          const isHeading = !isBullet && line.endsWith(':') && line.length <= 48;
-          const isKeyValue = !isBullet && line.includes(':') && !isHeading;
-
-          if (isHeading) {
-            return (
-              <Text key={`${line}-${index}`} style={styles.assistantHeading}>
-                {line}
-              </Text>
-            );
-          }
-
-          if (isBullet) {
-            return (
-              <View key={`${line}-${index}`} style={styles.bulletRow}>
-                <View style={styles.bulletDot} />
-                <Text style={styles.assistantParagraph}>{bulletText}</Text>
-              </View>
-            );
-          }
-
-          if (isKeyValue) {
-            const parts = line.split(':');
-            const label = parts[0]?.trim();
-            const value = parts.slice(1).join(':').trim();
-            return (
-              <View key={`${line}-${index}`} style={styles.kvRow}>
-                <Text style={styles.kvLabel}>{label}</Text>
-                <Text style={styles.kvValue}>{value}</Text>
-              </View>
-            );
-          }
-
+          const compact = line.replace(/\s+/g, ' ').trim();
+          if (/^\|.*\|$/.test(line)) return null;
+          const isBullet = /^[-*]\s+/.test(compact);
+          const normalized = isBullet ? '- ' + compact.replace(/^[-*]\s+/, '') : compact;
           return (
             <Text key={`${line}-${index}`} style={styles.assistantParagraph}>
-              {line}
+              {normalized}
             </Text>
           );
         })}
@@ -1612,56 +1603,12 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   assistantContent: {
-    gap: 8,
-  },
-  assistantHeading: {
-    color: '#b8ffcb',
-    fontSize: 13,
-    fontWeight: '700',
-    marginTop: 2,
+    gap: 6,
   },
   assistantParagraph: {
     color: '#e4e8f5',
     fontSize: 14,
-    lineHeight: 20,
-    flex: 1,
-  },
-  kvRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#131526',
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    gap: 8,
-  },
-  kvLabel: {
-    color: '#9aa0b4',
-    fontSize: 12,
-    fontWeight: '600',
-    flex: 1,
-  },
-  kvValue: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700',
-    textAlign: 'right',
-    flex: 1,
-  },
-  bulletRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-  },
-  bulletDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#4CAF50',
-    marginTop: 7,
+    lineHeight: 21,
   },
   messageTime: {
     color: 'rgba(255,255,255,0.5)',

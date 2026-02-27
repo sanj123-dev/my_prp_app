@@ -24,20 +24,32 @@ class AssistantTools:
                 pass
         return datetime.utcnow()
 
+    def _to_float(self, value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return 0.0
+
     async def financial_snapshot(self, user_id: str, days: int = 45) -> Dict[str, Any]:
         cutoff = datetime.utcnow() - timedelta(days=days)
         docs = await self.db.transactions.find({"user_id": user_id}).to_list(2500)
         recent = [d for d in docs if self._as_datetime(d.get("date", d.get("created_at"))) >= cutoff]
 
-        debit = sum(float(d.get("amount", 0.0) or 0.0) for d in recent if d.get("transaction_type", "debit") == "debit")
-        credit = sum(float(d.get("amount", 0.0) or 0.0) for d in recent if d.get("transaction_type", "debit") == "credit")
+        debit = sum(self._to_float(d.get("amount", 0.0)) for d in recent if str(d.get("transaction_type", "debit")) == "debit")
+        credit = sum(self._to_float(d.get("amount", 0.0)) for d in recent if str(d.get("transaction_type", "debit")) == "credit")
+        self_transfer = sum(
+            self._to_float(d.get("amount", 0.0))
+            for d in recent
+            if str(d.get("transaction_type", "debit")) == "self_transfer"
+        )
+        outflow = debit + self_transfer
 
         categories: Dict[str, float] = {}
         for d in recent:
-            if d.get("transaction_type", "debit") != "debit":
+            if str(d.get("transaction_type", "debit")) not in {"debit", "self_transfer"}:
                 continue
             cat = str(d.get("category", "Other"))
-            categories[cat] = categories.get(cat, 0.0) + float(d.get("amount", 0.0) or 0.0)
+            categories[cat] = categories.get(cat, 0.0) + self._to_float(d.get("amount", 0.0))
 
         top_categories = sorted(categories.items(), key=lambda item: item[1], reverse=True)[:5]
         return {
@@ -45,7 +57,9 @@ class AssistantTools:
             "transaction_count": len(recent),
             "total_debit": round(debit, 2),
             "total_credit": round(credit, 2),
-            "net_cashflow": round(credit - debit, 2),
+            "total_self_transfer": round(self_transfer, 2),
+            "total_outflow": round(outflow, 2),
+            "net_cashflow": round(credit - outflow, 2),
             "top_categories": [{"name": name, "amount": round(amount, 2)} for name, amount in top_categories],
         }
 
@@ -62,11 +76,11 @@ class AssistantTools:
 
         recent = [
             d for d in tx
-            if start_recent <= d["_dt"] <= now and str(d.get("transaction_type", "debit")) == "debit"
+            if start_recent <= d["_dt"] <= now and str(d.get("transaction_type", "debit")) in {"debit", "self_transfer"}
         ]
         previous = [
             d for d in tx
-            if start_prev <= d["_dt"] < start_recent and str(d.get("transaction_type", "debit")) == "debit"
+            if start_prev <= d["_dt"] < start_recent and str(d.get("transaction_type", "debit")) in {"debit", "self_transfer"}
         ]
 
         def summarize(items: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -124,7 +138,7 @@ class AssistantTools:
         spend_prev_7 = sum(
             float(d.get("amount", 0.0) or 0.0)
             for d in tx
-            if prev_seven_start <= d["_dt"] < seven_start and str(d.get("transaction_type", "debit")) == "debit"
+            if prev_seven_start <= d["_dt"] < seven_start and str(d.get("transaction_type", "debit")) in {"debit", "self_transfer"}
         )
         velocity_change_pct = ((spend_7 - spend_prev_7) / spend_prev_7 * 100.0) if spend_prev_7 > 0 else 0.0
 
@@ -181,22 +195,28 @@ class AssistantTools:
 
         selected.sort(key=lambda item: item["_dt"], reverse=True)
         debit = sum(
-            float(d.get("amount", 0.0) or 0.0)
+            self._to_float(d.get("amount", 0.0))
             for d in selected
             if str(d.get("transaction_type", "debit")) == "debit"
         )
         credit = sum(
-            float(d.get("amount", 0.0) or 0.0)
+            self._to_float(d.get("amount", 0.0))
             for d in selected
             if str(d.get("transaction_type", "debit")) == "credit"
         )
+        self_transfer = sum(
+            self._to_float(d.get("amount", 0.0))
+            for d in selected
+            if str(d.get("transaction_type", "debit")) == "self_transfer"
+        )
+        outflow = debit + self_transfer
 
         category_totals: Dict[str, float] = {}
         for d in selected:
-            if str(d.get("transaction_type", "debit")) != "debit":
+            if str(d.get("transaction_type", "debit")) not in {"debit", "self_transfer"}:
                 continue
             cat = str(d.get("category", "Other"))
-            category_totals[cat] = category_totals.get(cat, 0.0) + float(d.get("amount", 0.0) or 0.0)
+            category_totals[cat] = category_totals.get(cat, 0.0) + self._to_float(d.get("amount", 0.0))
 
         top_categories = [
             {"name": name, "amount": round(amount, 2)}
@@ -211,7 +231,7 @@ class AssistantTools:
                     "description": str(item.get("description", ""))[:120],
                     "category": str(item.get("category", "Other")),
                     "transaction_type": str(item.get("transaction_type", "debit")),
-                    "amount": round(float(item.get("amount", 0.0) or 0.0), 2),
+                    "amount": round(self._to_float(item.get("amount", 0.0)), 2),
                 }
             )
 
@@ -222,7 +242,9 @@ class AssistantTools:
             "transaction_count": len(selected),
             "total_debit": round(debit, 2),
             "total_credit": round(credit, 2),
-            "net_cashflow": round(credit - debit, 2),
+            "total_self_transfer": round(self_transfer, 2),
+            "total_outflow": round(outflow, 2),
+            "net_cashflow": round(credit - outflow, 2),
             "top_debit_categories": top_categories,
             "transactions": transactions,
         }
@@ -305,13 +327,37 @@ class AssistantTools:
         }
 
     async def recent_dialogue(self, user_id: str, session_id: str, limit: int = 8) -> List[Dict[str, str]]:
+        session = (session_id or "").strip()
+        query: Dict[str, Any] = {"user_id": user_id}
+        if session:
+            query["session_id"] = session
+
         docs = await (
             self.db.assistant_messages
-            .find({"user_id": user_id, "session_id": session_id})
+            .find(query)
             .sort("created_at", -1)
             .limit(limit)
             .to_list(limit)
         )
+        if not docs:
+            legacy_query: Dict[str, Any] = {"user_id": user_id}
+            if session:
+                legacy_query["session_id"] = session
+            legacy = await (
+                self.db.chat_messages
+                .find(legacy_query)
+                .sort("timestamp", -1)
+                .limit(limit)
+                .to_list(limit)
+            )
+            docs = [
+                {
+                    "role": item.get("role", ""),
+                    "content": item.get("message", ""),
+                    "created_at": item.get("timestamp", datetime.utcnow()),
+                }
+                for item in legacy
+            ]
         docs.reverse()
         dialogue: List[Dict[str, str]] = []
         for doc in docs:
@@ -323,6 +369,78 @@ class AssistantTools:
                 continue
             dialogue.append({"role": role, "content": content[:320]})
         return dialogue
+
+    async def all_time_dialogue(self, user_id: str, limit: int = 60) -> List[Dict[str, str]]:
+        docs = await (
+            self.db.assistant_messages
+            .find({"user_id": user_id})
+            .sort("created_at", -1)
+            .limit(limit)
+            .to_list(limit)
+        )
+        legacy = await (
+            self.db.chat_messages
+            .find({"user_id": user_id})
+            .sort("timestamp", -1)
+            .limit(max(20, limit // 2))
+            .to_list(max(20, limit // 2))
+        )
+
+        merged: List[Dict[str, Any]] = []
+        for item in docs:
+            merged.append(
+                {
+                    "role": str(item.get("role", "")),
+                    "content": str(item.get("content", "")),
+                    "_dt": self._as_datetime(item.get("created_at")),
+                }
+            )
+        for item in legacy:
+            merged.append(
+                {
+                    "role": str(item.get("role", "")),
+                    "content": str(item.get("message", "")),
+                    "_dt": self._as_datetime(item.get("timestamp")),
+                }
+            )
+
+        merged.sort(key=lambda x: x["_dt"])
+        merged = merged[-limit:]
+        dialogue: List[Dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in merged:
+            role = str(item.get("role", "")).strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            key = (role, content.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            dialogue.append({"role": role, "content": content[:320]})
+        return dialogue
+
+    async def conversation_profile(self, user_id: str) -> Dict[str, Any]:
+        dialogue = await self.all_time_dialogue(user_id=user_id, limit=80)
+        user_turns = [d for d in dialogue if d.get("role") == "user"]
+        ask_count = sum(1 for d in user_turns if "?" in str(d.get("content", "")))
+        stress_count = sum(
+            1
+            for d in user_turns
+            if any(
+                token in str(d.get("content", "")).lower()
+                for token in ["stress", "worried", "anxious", "panic", "overwhelmed", "urgent"]
+            )
+        )
+        return {
+            "total_turns": len(dialogue),
+            "user_turns": len(user_turns),
+            "question_ratio": round((ask_count / max(1, len(user_turns))) * 100.0, 1),
+            "stress_signal_count": stress_count,
+            "recent_user_messages": [str(x.get("content", "")) for x in user_turns[-6:]],
+        }
 
     async def user_style_preferences(self, user_id: str) -> Dict[str, Any]:
         pref = await self.db.assistant_user_prefs.find_one({"user_id": user_id}) or {}
