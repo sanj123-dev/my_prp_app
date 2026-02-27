@@ -45,13 +45,16 @@ const LIVE_SMS_SYNC_INTERVAL_MS = 45000;
 const TRANSACTION_HISTORY_LIMIT = 1000;
 const CATEGORIES = [
   'Food',
+  'Groceries',
   'Transport',
   'Shopping',
   'Bills',
   'Entertainment',
   'Health',
+  'Medical',
   'Education',
   'Travel',
+  'Transfer',
   'Other',
 ];
 
@@ -60,9 +63,12 @@ interface Transaction {
   amount: number;
   category: string;
   description: string;
+  merchant_name?: string;
+  bank_name?: string;
+  account_mask?: string;
   date: string;
   source: string;
-  transaction_type?: 'credit' | 'debit';
+  transaction_type?: 'credit' | 'debit' | 'self_transfer';
   sentiment?: string;
 }
 
@@ -357,7 +363,7 @@ export default function Transactions() {
         .map((m) => m.trim())
         .filter(Boolean);
 
-      const responses = await Promise.all(
+      const responses = await Promise.allSettled(
         messages.map((msg) =>
           axios.post(`${EXPO_PUBLIC_BACKEND_URL}/api/transactions/sms`, {
             user_id: userId,
@@ -366,15 +372,22 @@ export default function Transactions() {
         )
       );
 
-      const created = responses.map((r) => r.data as Transaction);
+      const created: Transaction[] = [];
+      for (const result of responses) {
+        if (result.status === 'fulfilled') {
+          created.push(result.value.data as Transaction);
+          continue;
+        }
+        if (axios.isAxiosError(result.reason) && result.reason.response?.status === 422) {
+          continue;
+        }
+        throw result.reason;
+      }
       mergeTransactions(created);
 
       setSmsText('');
       setShowSmsModal(false);
-      Alert.alert(
-        'Success',
-        `Imported ${created.length} SMS transaction${created.length === 1 ? '' : 's'}.`
-      );
+      Alert.alert('Success', `Imported ${created.length} SMS transaction${created.length === 1 ? '' : 's'}.`);
     } catch (error) {
       console.error('Error importing SMS transactions:', error);
       Alert.alert('Error', 'Failed to import SMS transactions.');
@@ -504,13 +517,16 @@ export default function Transactions() {
   const getCategoryColor = (category: string) => {
     const colors: Record<string, string> = {
       Food: '#FF6B6B',
+      Groceries: '#6CC24A',
       Transport: '#4ECDC4',
       Shopping: '#95E1D3',
       Bills: '#F38181',
       Entertainment: '#AA96DA',
       Health: '#FCBAD3',
+      Medical: '#FF9F9F',
       Education: '#FFFFD2',
       Travel: '#A8D8EA',
+      Transfer: '#6FA8DC',
       Other: '#999',
     };
     return colors[category] || '#999';
@@ -519,13 +535,16 @@ export default function Transactions() {
   const getCategoryIcon = (category: string) => {
     const icons: Record<string, keyof typeof Ionicons.glyphMap> = {
       Food: 'restaurant-outline',
+      Groceries: 'basket-outline',
       Transport: 'car-outline',
       Shopping: 'bag-outline',
       Bills: 'document-text-outline',
       Entertainment: 'film-outline',
       Health: 'medkit-outline',
+      Medical: 'medkit-outline',
       Education: 'school-outline',
       Travel: 'airplane-outline',
+      Transfer: 'swap-horizontal-outline',
       Other: 'pricetag-outline',
     };
     return icons[category] || 'pricetag-outline';
@@ -657,7 +676,18 @@ export default function Transactions() {
           </LinearGradient>
 
           <View style={styles.creditDebitRow}>
-            <View style={styles.creditDebitCard}>
+            <TouchableOpacity
+              style={styles.creditDebitCard}
+              onPress={() =>
+                router.push({
+                  pathname: '/transactions/type/[txnType]',
+                  params: {
+                    txnType: 'debit',
+                    month: selectedMonthKey,
+                  },
+                })
+              }
+            >
               <View style={styles.creditDebitHeader}>
                 <Ionicons name="arrow-down-circle-outline" size={16} color="#FF6B6B" />
                 <Text style={styles.creditDebitLabel}>Total Debit</Text>
@@ -665,8 +695,19 @@ export default function Transactions() {
               <Text style={styles.creditDebitValueDebit}>
                 {formatINR(selectedMonthDebit)}
               </Text>
-            </View>
-            <View style={styles.creditDebitCard}>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.creditDebitCard}
+              onPress={() =>
+                router.push({
+                  pathname: '/transactions/type/[txnType]',
+                  params: {
+                    txnType: 'credit',
+                    month: selectedMonthKey,
+                  },
+                })
+              }
+            >
               <View style={styles.creditDebitHeader}>
                 <Ionicons name="arrow-up-circle-outline" size={16} color="#4FC3F7" />
                 <Text style={styles.creditDebitLabel}>Total Credit</Text>
@@ -674,7 +715,7 @@ export default function Transactions() {
               <Text style={styles.creditDebitValueCredit}>
                 {formatINR(selectedMonthCredit)}
               </Text>
-            </View>
+            </TouchableOpacity>
           </View>
 
           <ScrollView
@@ -721,8 +762,9 @@ export default function Transactions() {
                 style={styles.categoryListCard}
                 onPress={() =>
                   router.push({
-                    pathname: '/analytics/[category]',
+                    pathname: '/transactions/type/[txnType]',
                     params: {
+                      txnType: 'category',
                       category: item.category,
                       month: selectedMonthKey,
                     },

@@ -342,6 +342,71 @@ class AssistantTools:
             },
         }
 
+    async def behaviour_profile(self, user_id: str, days: int = 180) -> Dict[str, Any]:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        docs = await self.db.transactions.find({"user_id": user_id}).to_list(6000)
+
+        debit_rows: List[Dict[str, Any]] = []
+        for row in docs:
+            dt = self._as_datetime(row.get("date", row.get("created_at")))
+            if dt < cutoff:
+                continue
+            tx_type = str(row.get("transaction_type", "debit")).strip().lower()
+            if tx_type not in {"debit", "self_transfer"}:
+                continue
+            debit_rows.append({**row, "_dt": dt, "_amount": float(row.get("amount", 0.0) or 0.0)})
+
+        total_spend = sum(item["_amount"] for item in debit_rows)
+        weekend_spend = sum(
+            item["_amount"] for item in debit_rows if int(item["_dt"].weekday()) in {5, 6}
+        )
+        late_night_spend = sum(
+            item["_amount"] for item in debit_rows if int(item["_dt"].hour) >= 21 or int(item["_dt"].hour) < 6
+        )
+
+        weekend_ratio = (weekend_spend / total_spend * 100.0) if total_spend > 0 else 0.0
+        late_night_ratio = (late_night_spend / total_spend * 100.0) if total_spend > 0 else 0.0
+
+        merchant_counts: Dict[str, int] = {}
+        category_counts: Dict[str, int] = {}
+        for item in debit_rows:
+            merchant = str(item.get("merchant_name", "")).strip().lower()
+            if merchant:
+                merchant_counts[merchant] = merchant_counts.get(merchant, 0) + 1
+            category = str(item.get("category", "Other")).strip()
+            category_counts[category] = category_counts.get(category, 0) + 1
+
+        recurring_merchants = [
+            {"merchant": name.title(), "count": count}
+            for name, count in sorted(merchant_counts.items(), key=lambda pair: pair[1], reverse=True)
+            if count >= 3
+        ][:6]
+
+        top_categories = [
+            {"name": name, "count": count}
+            for name, count in sorted(category_counts.items(), key=lambda pair: pair[1], reverse=True)[:5]
+        ]
+
+        habit_flags: List[str] = []
+        if weekend_ratio >= 35:
+            habit_flags.append("weekend_spike")
+        if late_night_ratio >= 18:
+            habit_flags.append("late_night_spending")
+        if recurring_merchants:
+            habit_flags.append("recurring_merchants")
+        if not habit_flags:
+            habit_flags.append("stable_pattern")
+
+        return {
+            "window_days": days,
+            "transaction_count": len(debit_rows),
+            "weekend_spend_ratio_pct": round(weekend_ratio, 1),
+            "late_night_spend_ratio_pct": round(late_night_ratio, 1),
+            "recurring_merchants": recurring_merchants,
+            "top_category_frequency": top_categories,
+            "habit_flags": habit_flags,
+        }
+
     def detect_dissatisfaction(self, text: str) -> bool:
         lowered = (text or "").strip().lower()
         if not lowered:

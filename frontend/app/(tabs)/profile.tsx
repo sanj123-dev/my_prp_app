@@ -28,7 +28,8 @@ export default function Profile() {
       if (savedUserId) {
         setUserId(savedUserId);
         const user = await getUserById(savedUserId);
-        setUserName(user.name);
+        const fullName = `${user.first_name ?? ''} ${user.last_name ?? ''}`.trim();
+        setUserName(fullName || user.name);
       }
     } catch (error) {
       console.error('Error loading profile:', error);
@@ -66,6 +67,18 @@ export default function Profile() {
           </View>
           <Text style={styles.userName}>{userName || 'User'}</Text>
           <Text style={styles.userId}>{userId ? `${userId.substring(0, 8)}...` : ''}</Text>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Profile Info</Text>
+
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/edit-profile')}>
+            <View style={styles.menuItemLeft}>
+              <Ionicons name="create-outline" size={24} color="#4CAF50" />
+              <Text style={styles.menuItemText}>Edit Profile</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#666" />
+          </TouchableOpacity>
         </View>
 
         <View style={styles.section}>

@@ -9,7 +9,7 @@ import base64
 from pathlib import Path
 from pydantic import BaseModel, Field
 from pydantic import EmailStr
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import uuid
 from datetime import datetime, timedelta
 import json
@@ -23,6 +23,7 @@ import requests
 from openai import AsyncOpenAI
 from src.goals import create_goal_router, init_goal_module
 from src.assistant import create_assistant_router, init_assistant_module
+from src.assistant.service import AssistantService
 
 # ==================== INIT ====================
 
@@ -48,6 +49,60 @@ VOICE_VAD_SILENCE_MS = int(os.environ.get("VOICE_VAD_SILENCE_MS", "900"))
 VOICE_TTS_PROVIDER = (os.environ.get("VOICE_TTS_PROVIDER", "none") or "none").strip().lower()
 ELEVENLABS_API_KEY = (os.environ.get("ELEVENLABS_API_KEY", "") or "").strip()
 ELEVENLABS_VOICE_ID = (os.environ.get("ELEVENLABS_VOICE_ID", "") or "").strip()
+_assistant_service: Optional[AssistantService] = None
+
+ALLOWED_CATEGORIES = {
+    "Food",
+    "Groceries",
+    "Transport",
+    "Shopping",
+    "Bills",
+    "Entertainment",
+    "Health",
+    "Medical",
+    "Education",
+    "Travel",
+    "Transfer",
+    "Other",
+}
+
+BANK_REFERENCE_DATA = [
+    {"code": "SBI", "name": "State Bank of India"},
+    {"code": "HDFC", "name": "HDFC Bank"},
+    {"code": "ICICI", "name": "ICICI Bank"},
+    {"code": "AXIS", "name": "Axis Bank"},
+    {"code": "KOTAK", "name": "Kotak Mahindra Bank"},
+    {"code": "PNB", "name": "Punjab National Bank"},
+    {"code": "BOB", "name": "Bank of Baroda"},
+    {"code": "YES", "name": "Yes Bank"},
+    {"code": "IDFC", "name": "IDFC First Bank"},
+    {"code": "INDUSIND", "name": "IndusInd Bank"},
+    {"code": "CANARA", "name": "Canara Bank"},
+    {"code": "UNION", "name": "Union Bank of India"},
+    {"code": "PAYTM", "name": "Paytm Payments Bank"},
+    {"code": "AIRTEL", "name": "Airtel Payments Bank"},
+    {"code": "FEDERAL", "name": "Federal Bank"},
+]
+
+BANK_KEYWORDS = {
+    "sbi",
+    "state bank",
+    "hdfc",
+    "icici",
+    "axis",
+    "kotak",
+    "pnb",
+    "bank of baroda",
+    "bob",
+    "yes bank",
+    "idfc",
+    "indusind",
+    "canara",
+    "union bank",
+    "federal bank",
+    "paytm payments bank",
+    "airtel payments bank",
+}
 
 # ==================== LLM HELPER ====================
 
@@ -149,6 +204,9 @@ class Transaction(BaseModel):
     sentiment: Optional[str] = None
     ref_id: Optional[str] = None
     merchant_key: Optional[str] = None
+    merchant_name: Optional[str] = None
+    bank_name: Optional[str] = None
+    account_mask: Optional[str] = None
     upi_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -216,12 +274,36 @@ class User(BaseModel):
     name: str
     email: EmailStr
     phone: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    profession: Optional[str] = None
+    education: Optional[str] = None
+    gender: Optional[str] = None
+    monthly_income: Optional[float] = None
+    saving_amount: Optional[float] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
 
 class UserCreate(BaseModel):
     name: str
     email: EmailStr
     phone: Optional[str] = None
+
+
+class UserProfileUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    profession: Optional[str] = None
+    education: Optional[str] = None
+    gender: Optional[str] = None
+    monthly_income: Optional[float] = None
+    saving_amount: Optional[float] = None
 
 class SignupRequest(BaseModel):
     name: str
@@ -304,6 +386,10 @@ class FinancialNewsItem(BaseModel):
 # ==================== AI FUNCTIONS ====================
 
 async def categorize_transaction_with_ai(text: str, amount: float) -> Dict[str, str]:
+    rule_based = _categorize_transaction_rule_based(text)
+    if rule_based:
+        return {"category": rule_based, "sentiment": "neutral"}
+
     try:
         prompt = f"""
 Analyze transaction:
@@ -312,7 +398,7 @@ Description: {text}
 
 Return ONLY JSON:
 {{
- "category":"Food|Transport|Shopping|Bills|Entertainment|Health|Education|Travel|Other",
+ "category":"Food|Groceries|Transport|Shopping|Bills|Entertainment|Health|Medical|Education|Travel|Transfer|Other",
  "sentiment":"positive|neutral|negative"
 }}
 """
@@ -324,20 +410,169 @@ Return ONLY JSON:
         )
 
         cleaned = response.replace("```json", "").replace("```", "").strip()
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        normalized_category = _normalize_category_name(str(parsed.get("category", "Other")))
+        if normalized_category not in ALLOWED_CATEGORIES:
+            normalized_category = "Other"
+        return {
+            "category": normalized_category,
+            "sentiment": str(parsed.get("sentiment", "neutral")).strip().lower() or "neutral",
+        }
 
     except Exception as e:
         logging.error(e)
         return {"category": "Other", "sentiment": "neutral"}
 
+
+def _categorize_transaction_rule_based(text: str) -> Optional[str]:
+    lowered = (text or "").lower()
+    transfer_patterns = [
+        "to own",
+        "self transfer",
+        "fund transfer to self",
+        "to self",
+        "own account",
+        "a/c transfer",
+        "account transfer",
+    ]
+    if any(pattern in lowered for pattern in transfer_patterns):
+        return "Transfer"
+    if any(pattern in lowered for pattern in ["grocery", "supermarket", "mart", "grocers"]):
+        return "Groceries"
+    if any(pattern in lowered for pattern in ["pharmacy", "medicine", "hospital", "medical"]):
+        return "Medical"
+    if any(pattern in lowered for pattern in ["neft", "imps", "rtgs", "bank transfer"]):
+        return "Transfer"
+    return None
+
+
+def _normalize_category_name(value: str) -> str:
+    raw = (value or "").strip().lower()
+    mapping = {
+        "self transfer": "Transfer",
+        "self_transfer": "Transfer",
+        "transfer": "Transfer",
+        "medical": "Medical",
+        "medicine": "Medical",
+        "health": "Health",
+        "groceries": "Groceries",
+        "grocery": "Groceries",
+    }
+    if raw in mapping:
+        return mapping[raw]
+    return (value or "").strip().title() or "Other"
+
+
+def _is_transaction_sms(text: str) -> bool:
+    sms = (text or "").strip().lower()
+    if not sms:
+        return False
+
+    amount_regex = re.compile(r"(?:rs\.?|inr|mrp|\$)\s*[0-9][0-9,]*(?:\.[0-9]+)?")
+    has_amount = bool(amount_regex.search(sms))
+    has_txn_signal = bool(
+        re.search(
+            r"\b(debited|credited|withdrawn|spent|purchase|paid|payment|upi|neft|imps|atm|card|txn|transaction|received)\b",
+            sms,
+        )
+    )
+    recharge_or_reminder = bool(
+        re.search(
+            r"\b(recharge|validity|plan|otp|reminder|bill due|due date|promo|offer|discount|loan offer|insurance)\b",
+            sms,
+        )
+    )
+    return has_amount and has_txn_signal and not recharge_or_reminder
+
+
+def _parse_datetime_from_string(value: Optional[str]) -> Optional[datetime]:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+async def _extract_sms_fields_with_ai(text: str) -> Dict[str, Any]:
+    prompt = f"""
+Extract transaction info from this SMS and return STRICT JSON only.
+
+SMS:
+{text}
+
+Return:
+{{
+  "is_transaction": true|false,
+  "merchant_name": "string|null",
+  "amount": number|null,
+  "transaction_datetime": "ISO-8601 or null",
+  "upi_id": "string|null",
+  "reference_id": "string|null",
+  "bank_name": "string|null",
+  "category": "Food|Groceries|Transport|Shopping|Bills|Entertainment|Health|Medical|Education|Travel|Transfer|Other|null",
+  "transaction_type": "credit|debit|self_transfer|null"
+}}
+"""
+    try:
+        response = await invoke_llm(
+            "You extract structured financial transaction entities from SMS. Return strict JSON only.",
+            prompt,
+            temperature=0.0,
+        )
+        cleaned = response.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(cleaned)
+        raw_type = str(parsed.get("transaction_type", "")).strip().lower()
+        normalized_type = (
+            normalize_transaction_type(raw_type) if raw_type else None
+        )
+        raw_category = parsed.get("category")
+        normalized_category = _normalize_category_name(str(raw_category)) if raw_category else None
+        if normalized_category and normalized_category not in ALLOWED_CATEGORIES:
+            normalized_category = None
+        amount = parsed.get("amount")
+        normalized_amount = None
+        if amount is not None:
+            amount_text = str(amount).replace(",", "").strip()
+            if amount_text:
+                normalized_amount = float(amount_text)
+        return {
+            "is_transaction": bool(parsed.get("is_transaction", False)),
+            "merchant_name": (str(parsed.get("merchant_name", "")).strip() or None),
+            "amount": normalized_amount,
+            "transaction_datetime": _parse_datetime_from_string(parsed.get("transaction_datetime")),
+            "upi_id": (str(parsed.get("upi_id", "")).strip().lower() or None),
+            "reference_id": (str(parsed.get("reference_id", "")).strip().upper() or None),
+            "bank_name": (str(parsed.get("bank_name", "")).strip() or None),
+            "category": normalized_category,
+            "transaction_type": normalized_type,
+        }
+    except Exception as error:
+        logging.warning("SMS field extraction via AI failed: %s", error)
+        return {}
+
 def normalize_transaction_type(value: str) -> str:
     normalized = (value or "").strip().lower()
-    if normalized not in {"credit", "debit"}:
-        raise HTTPException(status_code=400, detail="transaction_type must be 'credit' or 'debit'")
+    if normalized in {"self transfer", "self_transfer", "self-transfer"}:
+        return "self_transfer"
+    if normalized not in {"credit", "debit", "self_transfer"}:
+        raise HTTPException(status_code=400, detail="transaction_type must be 'credit', 'debit', or 'self_transfer'")
     return normalized
 
 def infer_transaction_type(text: str) -> str:
     lowered = (text or "").lower()
+
+    self_transfer_keywords = [
+        "self transfer",
+        "to own",
+        "own account",
+        "fund transfer to self",
+        "a/c transfer",
+        "account transfer",
+    ]
+    if any(keyword in lowered for keyword in self_transfer_keywords):
+        return "self_transfer"
 
     credit_keywords = [
         "credited",
@@ -377,6 +612,28 @@ def _normalize_merchant_label(value: str) -> str:
     return cleaned[:80]
 
 
+def _cleanup_merchant_candidate(raw_value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", re.sub(r"[^a-zA-Z0-9&@._ -]", " ", raw_value or "")).strip()
+    if not cleaned:
+        return ""
+
+    cleaned = re.split(
+        r"\b(?:ref|utr|txn|txnid|available|avl|balance|bal|a/c|account|ending|card|on)\b",
+        cleaned,
+        flags=re.IGNORECASE,
+    )[0].strip(" -:,.")
+    lowered = cleaned.lower()
+    if not lowered:
+        return ""
+    if any(bank_word in lowered for bank_word in BANK_KEYWORDS):
+        return ""
+    if lowered in {"upi", "imps", "neft", "rtgs", "merchant"}:
+        return ""
+    if re.fullmatch(r"\d+", lowered):
+        return ""
+    return cleaned[:60]
+
+
 def _extract_ref_id(text: str) -> Optional[str]:
     sms = text or ""
     patterns = [
@@ -407,26 +664,84 @@ def _extract_upi_id(text: str) -> Optional[str]:
     return f"{match.group(1).lower()}@{match.group(2).lower()}"
 
 
+def _extract_bank_name(text: str) -> Optional[str]:
+    sms = (text or "").lower()
+    if not sms:
+        return None
+
+    bank_signatures: List[Tuple[str, str]] = [
+        ("state bank", "State Bank of India"),
+        ("sbi", "State Bank of India"),
+        ("hdfc", "HDFC Bank"),
+        ("icici", "ICICI Bank"),
+        ("axis", "Axis Bank"),
+        ("kotak", "Kotak Mahindra Bank"),
+        ("pnb", "Punjab National Bank"),
+        ("yes bank", "Yes Bank"),
+        ("idfc", "IDFC First Bank"),
+        ("indusind", "IndusInd Bank"),
+        ("canara", "Canara Bank"),
+        ("union bank", "Union Bank of India"),
+        ("bank of baroda", "Bank of Baroda"),
+        ("federal bank", "Federal Bank"),
+        ("paytm payments bank", "Paytm Payments Bank"),
+    ]
+    for needle, bank_name in bank_signatures:
+        if needle in sms:
+            return bank_name
+    return None
+
+
+def _extract_account_mask(text: str) -> Optional[str]:
+    sms = text or ""
+    patterns = [
+        r"(?:a\/c|ac|account)\s*(?:no\.?|number)?\s*[:\-]?\s*(?:xx+|\*+)?\s*([0-9]{3,6})",
+        r"(?:ending|ends with)\s*([0-9]{3,6})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, sms, flags=re.IGNORECASE)
+        if match:
+            last_digits = (match.group(1) or "").strip()
+            if len(last_digits) >= 3:
+                return f"xx{last_digits[-4:]}" if len(last_digits) >= 4 else f"xx{last_digits}"
+    return None
+
+
+def _extract_merchant_name(text: str) -> Optional[str]:
+    sms = text or ""
+    upi_id = _extract_upi_id(sms)
+    if upi_id:
+        left = upi_id.split("@", 1)[0]
+        upi_name = _cleanup_merchant_candidate(left.replace(".", " ").replace("_", " ").replace("-", " "))
+        if upi_name:
+            return upi_name
+
+    patterns = [
+        r"(?:paid to|payment to|sent to|to|at|for|towards)\s+([A-Za-z0-9&._ -]{3,64})",
+        r"(?:merchant|payee)\s*[:\-]?\s*([A-Za-z0-9&._ -]{3,64})",
+        r"(?:credited from|received from)\s+([A-Za-z0-9&._ -]{3,64})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, sms, flags=re.IGNORECASE)
+        if match:
+            merchant = _cleanup_merchant_candidate(match.group(1))
+            if merchant:
+                return merchant
+
+    return None
+
+
 def _extract_merchant_key(text: str) -> Optional[str]:
     sms = text or ""
     upi_id = _extract_upi_id(sms)
     if upi_id:
         return f"upi:{upi_id}"
 
-    patterns = [
-        r"(?:to|at|for|towards)\s+([A-Za-z0-9&._ -]{3,40})",
-        r"(?:merchant|payee)\s*[:\-]?\s*([A-Za-z0-9&._ -]{3,40})",
-        r"(?:on)\s+([A-Za-z0-9&._ -]{3,40})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, sms, flags=re.IGNORECASE)
-        if match:
-            merchant = _normalize_merchant_label(match.group(1))
-            if merchant:
-                return f"merchant:{merchant}"
+    merchant_name = _extract_merchant_name(sms)
+    if merchant_name:
+        return f"merchant:{_normalize_merchant_label(merchant_name)}"
 
-    fallback = _normalize_merchant_label(sms[:40])
-    return f"merchant:{fallback}" if fallback else None
+    return None
 
 
 def _build_similar_match_query(
@@ -456,6 +771,104 @@ def _build_similar_match_query(
         query["$or"] = or_conditions
 
     return query
+
+
+async def _learned_category_for_transaction(
+    user_id: str,
+    merchant_key: Optional[str],
+    upi_id: Optional[str],
+) -> Optional[str]:
+    if not merchant_key and not upi_id:
+        return None
+
+    query: Dict[str, Any] = {"user_id": user_id}
+    or_conditions: List[Dict[str, Any]] = []
+    if upi_id:
+        or_conditions.append({"upi_id": upi_id})
+        or_conditions.append({"merchant_key": f"upi:{upi_id}"})
+    if merchant_key:
+        or_conditions.append({"merchant_key": merchant_key})
+    if not or_conditions:
+        return None
+    query["$or"] = or_conditions
+
+    rule = await db.transaction_category_rules.find_one(
+        query,
+        sort=[("updated_at", -1)],
+    )
+    if not rule:
+        return None
+    category = str(rule.get("category", "")).strip()
+    return category if category in ALLOWED_CATEGORIES else None
+
+
+async def _save_category_rule(
+    user_id: str,
+    category: str,
+    merchant_key: Optional[str],
+    upi_id: Optional[str],
+) -> None:
+    if category not in ALLOWED_CATEGORIES:
+        return
+    if not merchant_key and not upi_id:
+        return
+
+    selector: Dict[str, Any] = {"user_id": user_id}
+    if upi_id:
+        selector["upi_id"] = upi_id
+    elif merchant_key:
+        selector["merchant_key"] = merchant_key
+    else:
+        return
+
+    await db.transaction_category_rules.update_one(
+        selector,
+        {
+            "$set": {
+                "category": category,
+                "merchant_key": merchant_key,
+                "upi_id": upi_id,
+                "updated_at": datetime.utcnow(),
+            },
+            "$setOnInsert": {"created_at": datetime.utcnow()},
+        },
+        upsert=True,
+    )
+
+
+async def _init_bank_reference_data() -> None:
+    try:
+        await db.bank_reference.create_index("code", unique=True)
+        await db.bank_reference.create_index("name")
+    except Exception as error:
+        logging.warning("Unable to create bank_reference indexes: %s", error)
+
+    for bank in BANK_REFERENCE_DATA:
+        try:
+            await db.bank_reference.update_one(
+                {"code": bank["code"]},
+                {"$set": {"name": bank["name"], "updated_at": datetime.utcnow()}},
+                upsert=True,
+            )
+        except Exception as error:
+            logging.warning("Unable to upsert bank reference %s: %s", bank["code"], error)
+
+
+async def _init_transaction_learning_infra() -> None:
+    try:
+        await db.transaction_category_rules.create_index(
+            [("user_id", 1), ("merchant_key", 1)],
+            unique=True,
+            sparse=True,
+        )
+        await db.transaction_category_rules.create_index(
+            [("user_id", 1), ("upi_id", 1)],
+            unique=True,
+            sparse=True,
+        )
+        await db.transaction_category_rules.create_index([("updated_at", -1)])
+    except Exception as error:
+        logging.warning("Unable to initialize transaction learning indexes: %s", error)
 
 async def generate_insights(user_id: str) -> str:
     transactions = await db.transactions.find(
@@ -672,17 +1085,59 @@ def _shape_brief_coach_response(text: str) -> str:
 
     concise_lines: List[str] = []
     for line in lines:
-        if len(concise_lines) >= 3:
+        if len(concise_lines) >= 6:
             break
         trimmed = re.sub(r"\s+", " ", line).strip()
-        if len(trimmed) > 180:
-            trimmed = trimmed[:177].rstrip() + "..."
+        # Keep complete line content; avoid artificial truncation that creates "..." fragments.
+        trimmed = re.sub(r"\.\.\.\s*$", "", trimmed).strip()
         concise_lines.append(trimmed)
 
     shaped = "\n".join(concise_lines).strip()
-    if not shaped.endswith("?"):
+    if not shaped.endswith("?") and len(concise_lines) <= 4:
         shaped = f"{shaped}\nWhat should we improve first?"
     return shaped
+
+
+def _chunk_text_for_stream(text: str, chunk_size: int = 72) -> List[str]:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned:
+        return []
+
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    chunks: List[str] = []
+    current = ""
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if len(candidate) <= chunk_size:
+            current = candidate
+            continue
+
+        if current:
+            chunks.append(current)
+            current = sentence
+            if len(current) <= chunk_size:
+                continue
+
+        words = sentence.split(" ")
+        piece = ""
+        for word in words:
+            probe = f"{piece} {word}".strip() if piece else word
+            if len(probe) > chunk_size and piece:
+                chunks.append(piece)
+                piece = word
+            else:
+                piece = probe
+        if piece:
+            chunks.append(piece)
+        current = ""
+
+    if current:
+        chunks.append(current)
+
+    return chunks
 
 
 async def _translate_response_if_needed(text: str, language: Optional[str]) -> str:
@@ -1000,6 +1455,28 @@ async def _start_or_reuse_chat_session(
     await db.chat_sessions.insert_one(session.dict())
     return {**session.dict(), "_reused": False}
 
+
+def _get_assistant_service() -> AssistantService:
+    global _assistant_service
+    if _assistant_service is None:
+        _assistant_service = AssistantService(db)
+    return _assistant_service
+
+
+async def _assistant_carryover_summary(user_id: str, limit: int = 3) -> str:
+    docs = await db.assistant_memories.find({"user_id": user_id}).sort("created_at", -1).limit(limit).to_list(limit)
+    if not docs:
+        return "No prior behavioral memory yet."
+    lines: List[str] = []
+    for doc in docs:
+        text = str(doc.get("text", "")).strip()
+        if not text:
+            continue
+        lines.append(text[:140])
+    if not lines:
+        return "No prior behavioral memory yet."
+    return " | ".join(lines[:limit])
+
 # ==================== ROUTES ====================
 
 @api_router.get("/")
@@ -1096,11 +1573,84 @@ async def get_user(user_id: str):
         raise HTTPException(status_code=404, detail="User not found")
     return User(**user)
 
+
+@api_router.get("/banks")
+async def get_supported_banks():
+    rows = await db.bank_reference.find({}, {"_id": 0}).sort("name", 1).to_list(200)
+    return {"banks": rows}
+
+
+@api_router.put("/users/{user_id}/profile", response_model=User)
+async def update_user_profile(user_id: str, request: UserProfileUpdate):
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    update_data = request.dict(exclude_unset=True)
+    if not update_data:
+        return User(**user)
+
+    if "email" in update_data:
+        normalized_email = update_data["email"].strip().lower()
+        existing_user = await db.users.find_one(
+            {"email": normalized_email, "id": {"$ne": user_id}}
+        )
+        if existing_user:
+            raise HTTPException(status_code=409, detail="Email already exists")
+        update_data["email"] = normalized_email
+
+    text_fields = [
+        "first_name",
+        "last_name",
+        "phone",
+        "city",
+        "state",
+        "profession",
+        "education",
+        "gender",
+    ]
+    for field in text_fields:
+        if field in update_data and isinstance(update_data[field], str):
+            cleaned_value = update_data[field].strip()
+            update_data[field] = cleaned_value if cleaned_value else None
+
+    for field in ["monthly_income", "saving_amount"]:
+        if field in update_data and update_data[field] is not None and update_data[field] < 0:
+            raise HTTPException(status_code=400, detail=f"{field} must be greater than or equal to 0")
+
+    resolved_first_name = update_data.get("first_name", user.get("first_name"))
+    resolved_last_name = update_data.get("last_name", user.get("last_name"))
+    full_name = " ".join(filter(None, [resolved_first_name, resolved_last_name])).strip()
+    if full_name:
+        update_data["name"] = full_name
+    elif "first_name" in update_data or "last_name" in update_data:
+        existing_name = str(user.get("name", "")).strip()
+        update_data["name"] = existing_name or "User"
+
+    update_data["updated_at"] = datetime.utcnow()
+
+    await db.users.update_one({"id": user_id}, {"$set": update_data})
+    updated_user = await db.users.find_one({"id": user_id})
+    if not updated_user:
+        raise HTTPException(status_code=500, detail="Failed to update profile")
+    return User(**updated_user)
+
 @api_router.post("/transactions/manual", response_model=Transaction)
 async def create_manual_transaction(transaction: TransactionCreate):
-    ai_result = await categorize_transaction_with_ai(
-        transaction.description,
-        transaction.amount,
+    merchant_key = _extract_merchant_key(transaction.description)
+    upi_id = _extract_upi_id(transaction.description)
+    learned_category = await _learned_category_for_transaction(
+        transaction.user_id,
+        merchant_key=merchant_key,
+        upi_id=upi_id,
+    )
+    ai_result = (
+        {"category": learned_category, "sentiment": "neutral"}
+        if learned_category
+        else await categorize_transaction_with_ai(
+            transaction.description,
+            transaction.amount,
+        )
     )
 
     trans_dict = transaction.dict()
@@ -1113,8 +1663,11 @@ async def create_manual_transaction(transaction: TransactionCreate):
         if transaction.transaction_type
         else infer_transaction_type(transaction.description)
     )
-    trans_dict["upi_id"] = _extract_upi_id(transaction.description)
-    trans_dict["merchant_key"] = _extract_merchant_key(transaction.description)
+    trans_dict["upi_id"] = upi_id
+    trans_dict["merchant_key"] = merchant_key
+    trans_dict["merchant_name"] = _extract_merchant_name(transaction.description)
+    trans_dict["bank_name"] = _extract_bank_name(transaction.description)
+    trans_dict["account_mask"] = _extract_account_mask(transaction.description)
 
     trans_obj = Transaction(**trans_dict)
     await db.transactions.insert_one(trans_obj.dict())
@@ -1122,27 +1675,56 @@ async def create_manual_transaction(transaction: TransactionCreate):
 
 @api_router.post("/transactions/sms", response_model=Transaction)
 async def create_sms_transaction(request: SMSTransactionRequest):
-    amount_match = re.search(
-        r"(?:Rs\.?|INR|\$)\s*([0-9,]+\.?[0-9]*)",
-        request.sms_text,
-        re.IGNORECASE,
+    ai_fields = await _extract_sms_fields_with_ai(request.sms_text)
+    is_transaction_by_ai = bool(ai_fields.get("is_transaction"))
+
+    if not is_transaction_by_ai and not _is_transaction_sms(request.sms_text):
+        raise HTTPException(status_code=422, detail="SMS is not a financial transaction alert")
+
+    amount_from_ai = ai_fields.get("amount")
+    amount: Optional[float] = None
+    if amount_from_ai is not None:
+        try:
+            amount = float(amount_from_ai)
+        except Exception:
+            amount = None
+
+    if amount is None:
+        amount_match = re.search(
+            r"(?:Rs\.?|INR|\$)\s*([0-9,]+\.?[0-9]*)",
+            request.sms_text,
+            re.IGNORECASE,
+        )
+        if not amount_match:
+            raise HTTPException(400, "Amount not found")
+        amount = float(amount_match.group(1).replace(",", ""))
+
+    transaction_date = request.date or ai_fields.get("transaction_datetime") or datetime.utcnow()
+    description = request.sms_text[:140]
+    ref_id = ai_fields.get("reference_id") or _extract_ref_id(request.sms_text)
+    upi_id = ai_fields.get("upi_id") or _extract_upi_id(request.sms_text)
+    merchant_name = ai_fields.get("merchant_name") or _extract_merchant_name(request.sms_text)
+    merchant_key = f"merchant:{_normalize_merchant_label(merchant_name)}" if merchant_name else _extract_merchant_key(request.sms_text)
+    bank_name = ai_fields.get("bank_name") or _extract_bank_name(request.sms_text)
+    account_mask = _extract_account_mask(request.sms_text)
+
+    learned_category = await _learned_category_for_transaction(
+        request.user_id,
+        merchant_key=merchant_key,
+        upi_id=upi_id,
     )
-
-    if not amount_match:
-        raise HTTPException(400, "Amount not found")
-
-    amount = float(amount_match.group(1).replace(",", ""))
-
-    ai_result = await categorize_transaction_with_ai(
-        request.sms_text,
-        amount,
-    )
-
-    transaction_date = request.date or datetime.utcnow()
-    description = request.sms_text[:100]
-    ref_id = _extract_ref_id(request.sms_text)
-    upi_id = _extract_upi_id(request.sms_text)
-    merchant_key = _extract_merchant_key(request.sms_text)
+    category_from_ai = ai_fields.get("category")
+    transaction_type = ai_fields.get("transaction_type") or infer_transaction_type(request.sms_text)
+    ai_result = {"category": "Other", "sentiment": "neutral"}
+    if learned_category:
+        ai_result["category"] = learned_category
+    elif category_from_ai and category_from_ai in ALLOWED_CATEGORIES:
+        ai_result["category"] = category_from_ai
+    else:
+        ai_result = await categorize_transaction_with_ai(
+            request.sms_text,
+            amount,
+        )
 
     if ref_id:
         existing_by_ref = await db.transactions.find_one(
@@ -1182,10 +1764,13 @@ async def create_sms_transaction(request: SMSTransactionRequest):
         description=description,
         date=transaction_date,
         source="sms",
-        transaction_type=infer_transaction_type(request.sms_text),
+        transaction_type=transaction_type,
         sentiment=ai_result["sentiment"],
         ref_id=ref_id,
         merchant_key=merchant_key,
+        merchant_name=merchant_name,
+        bank_name=bank_name,
+        account_mask=account_mask,
         upi_id=upi_id,
     )
 
@@ -1243,6 +1828,13 @@ async def get_user_transactions(user_id: str, limit: int = 50):
     for item in raw_transactions:
         doc = dict(item)
         doc["date"] = doc.get("date") or doc.get("created_at") or datetime.utcnow()
+        description = str(doc.get("description", ""))
+        if not doc.get("merchant_name"):
+            doc["merchant_name"] = _extract_merchant_name(description)
+        if not doc.get("bank_name"):
+            doc["bank_name"] = _extract_bank_name(description)
+        if not doc.get("account_mask"):
+            doc["account_mask"] = _extract_account_mask(description)
         normalized.append(doc)
 
     normalized.sort(key=lambda tx: _transaction_datetime(tx), reverse=True)
@@ -1250,20 +1842,8 @@ async def get_user_transactions(user_id: str, limit: int = 50):
 
 @api_router.put("/transactions/{transaction_id}/category", response_model=Transaction)
 async def update_transaction_category(transaction_id: str, request: TransactionCategoryUpdate):
-    allowed_categories = {
-        "Food",
-        "Transport",
-        "Shopping",
-        "Bills",
-        "Entertainment",
-        "Health",
-        "Education",
-        "Travel",
-        "Other",
-    }
-
-    normalized_category = request.category.strip().title()
-    if normalized_category not in allowed_categories:
+    normalized_category = _normalize_category_name(request.category)
+    if normalized_category not in ALLOWED_CATEGORIES:
         raise HTTPException(status_code=400, detail="Invalid category")
 
     update_result = await db.transactions.update_one(
@@ -1299,6 +1879,14 @@ async def update_transaction_category(transaction_id: str, request: TransactionC
                 {"$set": {"category": normalized_category}},
             )
 
+    if updated_transaction:
+        await _save_category_rule(
+            user_id=request.user_id,
+            category=normalized_category,
+            merchant_key=updated_transaction.get("merchant_key"),
+            upi_id=updated_transaction.get("upi_id"),
+        )
+
     return Transaction(**updated_transaction)
 
 @api_router.put("/transactions/{transaction_id}/amount", response_model=Transaction)
@@ -1321,18 +1909,6 @@ async def update_transaction_amount(transaction_id: str, request: TransactionAmo
 
 @api_router.put("/transactions/{transaction_id}", response_model=Transaction)
 async def update_transaction(transaction_id: str, request: TransactionUpdateRequest):
-    allowed_categories = {
-        "Food",
-        "Transport",
-        "Shopping",
-        "Bills",
-        "Entertainment",
-        "Health",
-        "Education",
-        "Travel",
-        "Other",
-    }
-
     update_fields: Dict[str, object] = {}
 
     if request.amount is not None:
@@ -1341,8 +1917,8 @@ async def update_transaction(transaction_id: str, request: TransactionUpdateRequ
         update_fields["amount"] = float(request.amount)
 
     if request.category is not None:
-        normalized_category = request.category.strip().title()
-        if normalized_category not in allowed_categories:
+        normalized_category = _normalize_category_name(request.category)
+        if normalized_category not in ALLOWED_CATEGORIES:
             raise HTTPException(status_code=400, detail="Invalid category")
         update_fields["category"] = normalized_category
 
@@ -1358,6 +1934,9 @@ async def update_transaction(transaction_id: str, request: TransactionUpdateRequ
         update_fields["description"] = cleaned_description
         update_fields["upi_id"] = _extract_upi_id(cleaned_description)
         update_fields["merchant_key"] = _extract_merchant_key(cleaned_description)
+        update_fields["merchant_name"] = _extract_merchant_name(cleaned_description)
+        update_fields["bank_name"] = _extract_bank_name(cleaned_description)
+        update_fields["account_mask"] = _extract_account_mask(cleaned_description)
 
     if request.date is not None:
         update_fields["date"] = request.date
@@ -1376,6 +1955,13 @@ async def update_transaction(transaction_id: str, request: TransactionUpdateRequ
     updated_transaction = await db.transactions.find_one(
         {"id": transaction_id, "user_id": request.user_id}
     )
+    if request.category is not None and updated_transaction:
+        await _save_category_rule(
+            user_id=request.user_id,
+            category=str(updated_transaction.get("category", "Other")),
+            merchant_key=updated_transaction.get("merchant_key"),
+            upi_id=updated_transaction.get("upi_id"),
+        )
     return Transaction(**updated_transaction)
 
 @api_router.get("/transactions/{user_id}/analytics")
@@ -1566,6 +2152,22 @@ async def get_financial_news(limit: int = 10):
 @api_router.post("/chat/session/start", response_model=ChatSessionStartResponse)
 async def start_chat_session(request: ChatSessionStartRequest):
     preferred_language = (request.language or "English").strip() or "English"
+    try:
+        assistant_service = _get_assistant_service()
+        session = await assistant_service.start_or_reuse_session(
+            user_id=request.user_id,
+            language=preferred_language,
+            existing_session_id=request.existing_session_id,
+        )
+        carryover = await _assistant_carryover_summary(request.user_id)
+        return ChatSessionStartResponse(
+            session_id=str(session["id"]),
+            carryover_insights=carryover,
+            reused=bool(session.get("_reused", False)),
+        )
+    except Exception as error:
+        logging.exception("Advanced assistant session start failed, using legacy session flow: %s", error)
+
     session = await _start_or_reuse_chat_session(
         user_id=request.user_id,
         language=preferred_language,
@@ -1594,6 +2196,29 @@ async def chat_with_ai(request: ChatRequest):
         message_source = "text"
 
     preferred_language = (request.language or "English").strip() or "English"
+    try:
+        assistant_service = _get_assistant_service()
+        result = await assistant_service.chat(
+            user_id=request.user_id,
+            message=request.message,
+            session_id=request.session_id,
+            language=preferred_language,
+            source=message_source,
+        )
+        response = _enforce_rupee_only(str(result.get("response", "")))
+        response = await _translate_response_if_needed(response, preferred_language)
+        payload: Dict[str, Any] = {
+            "response": response,
+            "session_id": str(result.get("session_id", "")),
+        }
+        if result.get("agent_trace"):
+            payload["agent_trace"] = result.get("agent_trace", [])
+        if result.get("citations"):
+            payload["citations"] = result.get("citations", [])
+        return payload
+    except Exception as error:
+        logging.exception("Advanced assistant chat failed, falling back to legacy chat flow: %s", error)
+
     active_session = await _start_or_reuse_chat_session(
         user_id=request.user_id,
         language=preferred_language,
@@ -1729,20 +2354,77 @@ async def voice_realtime_ws(websocket: WebSocket):
             return
 
         preferred_language = (active_language or "English").strip() or "English"
-        active_session = await _start_or_reuse_chat_session(
-            user_id=active_user_id,
-            language=preferred_language,
-            existing_session_id=active_session_id or None,
-        )
-        active_session_id = str(active_session["id"])
+        carryover_insights = "No prior session insights yet."
+        try:
+            assistant_service = _get_assistant_service()
+            advanced_session = await assistant_service.start_or_reuse_session(
+                user_id=active_user_id,
+                language=preferred_language,
+                existing_session_id=active_session_id or None,
+            )
+            active_session_id = str(advanced_session["id"])
+            carryover_insights = await _assistant_carryover_summary(active_user_id)
+        except Exception as error:
+            logging.exception("Advanced voice session bootstrap failed, using legacy session: %s", error)
+            active_session = await _start_or_reuse_chat_session(
+                user_id=active_user_id,
+                language=preferred_language,
+                existing_session_id=active_session_id or None,
+            )
+            active_session_id = str(active_session["id"])
+            carryover_insights = (
+                str(active_session.get("carryover_insights", "")).strip()
+                or "No prior session insights yet."
+            )
+
         await ws_send(
             {
                 "type": "session.started",
                 "session_id": active_session_id,
-                "carryover_insights": str(active_session.get("carryover_insights", "")),
+                "carryover_insights": carryover_insights,
             }
         )
 
+        # Primary path: use advanced assistant orchestration for voice parity with text chat.
+        try:
+            assistant_service = _get_assistant_service()
+            result = await assistant_service.chat(
+                user_id=active_user_id,
+                message=user_message,
+                session_id=active_session_id or None,
+                language=preferred_language,
+                source=source,
+            )
+
+            active_session_id = str(result.get("session_id", active_session_id))
+            response = _enforce_rupee_only(str(result.get("response", "")).strip())
+            response = await _translate_response_if_needed(response, preferred_language)
+            response = _shape_brief_coach_response(response)
+
+            await ws_send({"type": "assistant.response.start"})
+            for delta in _chunk_text_for_stream(response):
+                await ws_send({"type": "assistant.text.delta", "delta": delta + " "})
+
+            await ws_send(
+                {
+                    "type": "assistant.text.final",
+                    "text": response,
+                    "session_id": active_session_id,
+                }
+            )
+
+            tts_payload = await asyncio.to_thread(
+                _synthesize_voice_audio_b64,
+                response,
+                preferred_language,
+            )
+            if tts_payload:
+                await ws_send({"type": "assistant.audio", **tts_payload})
+            return
+        except Exception as error:
+            logging.exception("Advanced voice generation failed, falling back to legacy voice flow: %s", error)
+
+        # Legacy fallback path
         user_msg = ChatMessage(
             user_id=active_user_id,
             role="user",
@@ -1760,10 +2442,6 @@ async def voice_realtime_ws(websocket: WebSocket):
 
         snapshot_prompt = _build_snapshot_prompt(snapshot)
         wants_data = _is_data_question(user_message)
-        carryover_insights = (
-            str(active_session.get("carryover_insights", "")).strip()
-            or "No prior session insights yet."
-        )
 
         llm_user_prompt = (
             f"{snapshot_prompt}\n\n"
@@ -1906,18 +2584,34 @@ async def voice_realtime_ws(websocket: WebSocket):
                 if not active_user_id:
                     await ws_send({"type": "error", "detail": "user_id_required"})
                     continue
-                session = await _start_or_reuse_chat_session(
-                    user_id=active_user_id,
-                    language=active_language,
-                    existing_session_id=active_session_id or None,
-                )
-                active_session_id = str(session["id"])
+                carryover_text = "No prior behavioral memory yet."
+                reused = False
+                try:
+                    assistant_service = _get_assistant_service()
+                    session = await assistant_service.start_or_reuse_session(
+                        user_id=active_user_id,
+                        language=active_language,
+                        existing_session_id=active_session_id or None,
+                    )
+                    active_session_id = str(session["id"])
+                    reused = bool(session.get("_reused", False))
+                    carryover_text = await _assistant_carryover_summary(active_user_id)
+                except Exception as error:
+                    logging.exception("Advanced voice session.start failed, using legacy start: %s", error)
+                    session = await _start_or_reuse_chat_session(
+                        user_id=active_user_id,
+                        language=active_language,
+                        existing_session_id=active_session_id or None,
+                    )
+                    active_session_id = str(session["id"])
+                    reused = bool(session.get("_reused", False))
+                    carryover_text = str(session.get("carryover_insights", ""))
                 await ws_send(
                     {
                         "type": "session.started",
                         "session_id": active_session_id,
-                        "carryover_insights": str(session.get("carryover_insights", "")),
-                        "reused": bool(session.get("_reused", False)),
+                        "carryover_insights": carryover_text,
+                        "reused": reused,
                     }
                 )
                 continue
@@ -1961,6 +2655,33 @@ async def voice_realtime_ws(websocket: WebSocket):
 
 @api_router.get("/chat/{user_id}", response_model=List[ChatMessage])
 async def get_chat_history(user_id: str, limit: int = 50):
+    try:
+        docs = await db.assistant_messages.find(
+            {"user_id": user_id}
+        ).sort("created_at", -1).limit(limit).to_list(limit)
+        if docs:
+            docs.reverse()
+            mapped: List[ChatMessage] = []
+            for item in docs:
+                metadata = dict(item.get("metadata", {}) or {})
+                source = str(metadata.get("source", "text")).strip().lower()
+                if source not in {"text", "voice"}:
+                    source = "text"
+                mapped.append(
+                    ChatMessage(
+                        id=str(item.get("id", str(uuid.uuid4()))),
+                        user_id=user_id,
+                        role=str(item.get("role", "assistant")),
+                        message=str(item.get("content", "")),
+                        session_id=str(item.get("session_id", "")) or None,
+                        source=source,
+                        timestamp=item.get("created_at", datetime.utcnow()),
+                    )
+                )
+            return mapped
+    except Exception as error:
+        logging.exception("Advanced assistant history fetch failed, using legacy history: %s", error)
+
     messages = await db.chat_messages.find(
         {"user_id": user_id}
     ).sort("timestamp", -1).limit(limit).to_list(limit)
@@ -1985,6 +2706,14 @@ logging.basicConfig(level=logging.INFO)
 
 @app.on_event("startup")
 async def startup_tasks():
+    try:
+        await _init_bank_reference_data()
+    except Exception as error:
+        logging.exception("Bank reference init failed at startup: %s", error)
+    try:
+        await _init_transaction_learning_infra()
+    except Exception as error:
+        logging.exception("Transaction learning init failed at startup: %s", error)
     try:
         await init_goal_module(db)
     except Exception as error:

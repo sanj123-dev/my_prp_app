@@ -9,7 +9,17 @@ type ApiUser = {
   name: string;
   email: string;
   phone?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  city?: string | null;
+  state?: string | null;
+  profession?: string | null;
+  education?: string | null;
+  gender?: string | null;
+  monthly_income?: number | null;
+  saving_amount?: number | null;
   created_at?: string;
+  updated_at?: string | null;
 };
 
 export type UserProfile = ApiUser;
@@ -24,6 +34,20 @@ export type SignupPayload = {
 export type LoginPayload = {
   email: string;
   password: string;
+};
+
+export type UpdateUserProfilePayload = {
+  first_name?: string | null;
+  last_name?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  city?: string | null;
+  state?: string | null;
+  profession?: string | null;
+  education?: string | null;
+  gender?: string | null;
+  monthly_income?: number | null;
+  saving_amount?: number | null;
 };
 
 const requireBackendUrl = () => {
@@ -94,6 +118,23 @@ export const getUserById = async (userId: string): Promise<UserProfile> => {
     return response.data;
   } catch (error) {
     const message = buildMessage(error, 'Unable to fetch profile');
+    throw new Error(message);
+  }
+};
+
+export const updateUserProfile = async (
+  userId: string,
+  payload: UpdateUserProfilePayload
+): Promise<UserProfile> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.put<UserProfile>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/users/${userId}/profile`,
+      payload
+    );
+    return response.data;
+  } catch (error) {
+    const message = buildMessage(error, 'Unable to update profile');
     throw new Error(message);
   }
 };

@@ -136,6 +136,7 @@ class UserStateAgent(BaseAgent):
         dialogue = await ctx.tools.recent_dialogue(user_id=user_id, session_id=session_id, limit=8)
         prefs = await ctx.tools.user_style_preferences(user_id=user_id)
         sem_hits = await ctx.tools.semantic_context(user_id=user_id, query=message, limit=6)
+        behaviour_profile = await ctx.tools.behaviour_profile(user_id=user_id, days=180)
 
         response_style = ctx.tools.preferred_response_style(message=message, dialogue=dialogue)
         preferred_style = str(prefs.get("style_preference", "balanced"))
@@ -180,6 +181,7 @@ class UserStateAgent(BaseAgent):
             "goals": list(profile.get("goals", [])),
             "risk_profile": risk_profile,
             "habits": self._habit_signals(analytics_90),
+            "behaviour_profile": behaviour_profile,
             "sentiment_history": sentiment_history,
             "anomalies": anomalies[:5],
             "lifecycle_stage": lifecycle_stage,
@@ -244,6 +246,8 @@ class PlannerAgent(BaseAgent):
             "investment",
             "learning",
             "financial_health",
+            "explainability",
+            "engagement",
             "synthesizer",
         ]
 
@@ -259,9 +263,20 @@ class PlannerAgent(BaseAgent):
             missing_fields.append("investment_horizon")
 
         if intent == "education_request":
-            plan = ["learning", "financial_health", "synthesizer"]
+            plan = ["learning", "financial_health", "explainability", "engagement", "synthesizer"]
         elif intent == "emotional_spending":
-            plan = ["transaction_query", "expense", "behaviour", "sentiment", "budget", "learning", "financial_health", "synthesizer"]
+            plan = [
+                "transaction_query",
+                "expense",
+                "behaviour",
+                "sentiment",
+                "budget",
+                "learning",
+                "financial_health",
+                "explainability",
+                "engagement",
+                "synthesizer",
+            ]
 
         anomalies = list(user_state.get("anomalies", []))
         if len(anomalies) >= 3:
@@ -563,6 +578,113 @@ class FinancialHealthAgent(BaseAgent):
         return state
 
 
+class ExplainabilityAgent(BaseAgent):
+    name = "explainability"
+
+    async def run(self, state: Dict[str, Any], ctx: AgentContext) -> Dict[str, Any]:
+        user_state = dict(state.get("user_state", {}))
+        expense = dict(state.get("expense_report", {}))
+        budget = dict(state.get("budget_report", {}))
+        forecast = dict(state.get("forecast_report", {}))
+        behaviour = dict(state.get("behaviour_report", {}))
+        health = dict(state.get("financial_health_report", {}))
+        tx = dict(state.get("transaction_report", {}))
+        behaviour_profile = dict(user_state.get("behaviour_profile", {}))
+
+        reasons: List[str] = []
+        evidence: List[Dict[str, Any]] = []
+
+        period_change = float(expense.get("period_change_pct", 0.0) or 0.0)
+        if abs(period_change) >= 8:
+            reasons.append(f"Your spending changed by {period_change:+.1f}% recently.")
+            evidence.append({"metric": "period_change_pct", "value": round(period_change, 1)})
+
+        overspending = bool(budget.get("overspending_detected", False))
+        if overspending:
+            reasons.append("You are above your current spend guardrail, so advice focuses on control first.")
+            evidence.append(
+                {
+                    "metric": "spend_vs_limit",
+                    "value": {
+                        "current_spend": float(budget.get("current_spend", 0.0) or 0.0),
+                        "limit": float(budget.get("essential_spend_limit", 0.0) or 0.0),
+                    },
+                }
+            )
+
+        projected_net = float(forecast.get("projected_net", 0.0) or 0.0)
+        reasons.append(
+            "Projected month-end net is "
+            + (f"positive (\u20b9{projected_net:,.0f})" if projected_net >= 0 else f"negative (\u20b9{projected_net:,.0f})")
+            + ", which directly shapes the recommendation."
+        )
+        evidence.append({"metric": "projected_net", "value": round(projected_net, 2)})
+
+        discipline = float(behaviour.get("discipline_score", 0.0) or 0.0)
+        reasons.append(f"Your current discipline score is {discipline:.1f}/100.")
+        evidence.append({"metric": "discipline_score", "value": round(discipline, 1)})
+
+        weekend_ratio = float(behaviour_profile.get("weekend_spend_ratio_pct", 0.0) or 0.0)
+        if weekend_ratio >= 30:
+            reasons.append("Weekend spending is a major pattern, so we target weekend decisions.")
+            evidence.append({"metric": "weekend_spend_ratio_pct", "value": round(weekend_ratio, 1)})
+
+        tx_count = int(tx.get("transaction_count", 0) or 0)
+        if tx_count > 0:
+            reasons.append(f"This response uses {tx_count} transactions from your selected period.")
+
+        state["explainability_report"] = {
+            "reasons": reasons[:5],
+            "evidence": evidence[:6],
+            "health_band": str(health.get("health_band", "watch")),
+        }
+        self._trace(state, self.name)
+        return state
+
+
+class EngagementAgent(BaseAgent):
+    name = "engagement"
+
+    async def run(self, state: Dict[str, Any], ctx: AgentContext) -> Dict[str, Any]:
+        user_state = dict(state.get("user_state", {}))
+        sentiment = dict(state.get("sentiment_report", {}))
+        health = dict(state.get("financial_health_report", {}))
+        behaviour = dict(user_state.get("behaviour_profile", {}))
+        learning = dict(state.get("learning_report", {}))
+
+        mood = str(sentiment.get("mood_label", "calm"))
+        health_band = str(health.get("health_band", "watch"))
+        habit_flags = list(behaviour.get("habit_flags", []))
+
+        opening = "You are making solid progress."
+        if mood == "support_needed":
+            opening = "You are not behind; we can make this manageable in small steps."
+        elif mood == "curious":
+            opening = "Great question. You are thinking in the right direction."
+
+        micro_action = "Track only your top 2 categories for the next 7 days."
+        if "weekend_spike" in habit_flags:
+            micro_action = "Set a weekend spend cap and review it every Sunday evening."
+        elif "late_night_spending" in habit_flags:
+            micro_action = "Use a 10-minute pause rule for purchases after 9 PM."
+        elif health_band == "good":
+            micro_action = "Automate one extra transfer to savings this week."
+
+        tips = list(learning.get("tips", []))
+        nudge = "Want me to build a simple 7-day action plan?"
+        if tips:
+            nudge = f"Want me to turn this into a one-week checklist based on: {tips[0]}"
+
+        state["engagement_report"] = {
+            "human_opening": opening,
+            "micro_action": micro_action,
+            "nudge_question": nudge,
+            "engagement_mode": "supportive" if mood == "support_needed" else "coach",
+        }
+        self._trace(state, self.name)
+        return state
+
+
 class SynthesizerAgent(BaseAgent):
     name = "synthesizer"
 
@@ -580,6 +702,8 @@ class SynthesizerAgent(BaseAgent):
                     "If transaction_report has entries, include a small markdown table (up to 5 rows). "
                     "If intent is investment_question, be especially engaging: "
                     "explain readiness clearly, show 2-3 practical options, and ask one follow-up question. "
+                    "Always include explainability naturally: why this advice fits this user, based on evidence. "
+                    "Use engagement_report to keep the response human, motivating, and specific. "
                     "For all intents, return: "
                     "1) direct answer, 2) strongest insight, 3) practical next action. "
                     "End with one short follow-up question when it helps continue the conversation. "
@@ -595,6 +719,7 @@ class SynthesizerAgent(BaseAgent):
                     "Expense report: {expense}\nBudget report: {budget}\nForecast: {forecast}\n"
                     "Behaviour: {behaviour}\nSentiment: {sentiment}\nInvestment: {investment}\n"
                     "Learning: {learning}\nFinancial health: {health}\n"
+                    "Explainability: {explainability}\nEngagement: {engagement}\n"
                     "Transaction report: {transaction_report}",
                 ),
             ]
@@ -620,6 +745,8 @@ class SynthesizerAgent(BaseAgent):
                     "investment": json.dumps(state.get("investment_report", {})),
                     "learning": json.dumps(state.get("learning_report", {})),
                     "health": json.dumps(state.get("financial_health_report", {})),
+                    "explainability": json.dumps(state.get("explainability_report", {})),
+                    "engagement": json.dumps(state.get("engagement_report", {})),
                     "transaction_report": json.dumps(state.get("transaction_report", {})),
                 }
             )
@@ -728,11 +855,15 @@ class MemoryUpdateAgent(BaseAgent):
         health = dict(state.get("financial_health_report", {}))
         sentiment = dict(state.get("sentiment_report", {}))
         investment = dict(state.get("investment_report", {}))
+        engagement = dict(state.get("engagement_report", {}))
+        explainability = dict(state.get("explainability_report", {}))
 
         memory_text = (
             f"Health={health.get('overall_health_score', 0)} ({health.get('health_band', 'watch')}). "
             f"SentimentFlag={sentiment.get('emotional_spending_flag', False)}. "
-            f"RiskReadiness={investment.get('readiness', 'unknown')}."
+            f"RiskReadiness={investment.get('readiness', 'unknown')}. "
+            f"Action={engagement.get('micro_action', 'none')}. "
+            f"Reason={'; '.join(list(explainability.get('reasons', []))[:1])}"
         )
         payload = {
             "id": str(uuid.uuid4()),
@@ -786,6 +917,8 @@ class AssistantOrchestrator:
             "investment": InvestmentAgent(),
             "learning": LearningAgent(),
             "financial_health": FinancialHealthAgent(),
+            "explainability": ExplainabilityAgent(),
+            "engagement": EngagementAgent(),
             "synthesizer": SynthesizerAgent(),
         }
         self.review = HumanReviewAgent()

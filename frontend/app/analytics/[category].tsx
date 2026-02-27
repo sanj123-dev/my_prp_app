@@ -36,9 +36,12 @@ type Transaction = {
   amount: number;
   category: string;
   description: string;
+  merchant_name?: string;
+  bank_name?: string;
+  account_mask?: string;
   date: string;
   source: string;
-  transaction_type?: 'credit' | 'debit';
+  transaction_type?: 'credit' | 'debit' | 'self_transfer';
   sentiment?: string;
 };
 
@@ -57,13 +60,16 @@ type MonthOption = {
 
 const CATEGORIES = [
   'Food',
+  'Groceries',
   'Transport',
   'Shopping',
   'Bills',
   'Entertainment',
   'Health',
+  'Medical',
   'Education',
   'Travel',
+  'Transfer',
   'Other',
 ];
 
@@ -165,13 +171,16 @@ export default function CategoryDetail() {
   const getCategoryIcon = (categoryName: string) => {
     const icons: Record<string, keyof typeof Ionicons.glyphMap> = {
       Food: 'restaurant-outline',
+      Groceries: 'basket-outline',
       Transport: 'car-outline',
       Shopping: 'bag-outline',
       Bills: 'document-text-outline',
       Entertainment: 'film-outline',
       Health: 'medkit-outline',
+      Medical: 'medkit-outline',
       Education: 'school-outline',
       Travel: 'airplane-outline',
+      Transfer: 'swap-horizontal-outline',
       Other: 'pricetag-outline',
     };
     return icons[categoryName] || 'pricetag-outline';
@@ -450,10 +459,10 @@ export default function CategoryDetail() {
                 </View>
                 <View style={styles.cardMeta}>
                   <Text style={styles.cardTitle} numberOfLines={1}>
-                    {getMerchantLabel(t.description)}
+                    {t.merchant_name || 'Unknown Merchant'}
                   </Text>
                   <Text style={styles.cardSubTitle}>
-                    {getDateLabel(t.date)}
+                    <Ionicons name="business-outline" size={11} color="#7bb8eb" /> {t.bank_name || 'Bank'} {t.account_mask ? `(${t.account_mask})` : ''} | {getDateLabel(t.date)}
                   </Text>
                 </View>
                 <View style={styles.amountWrap}>

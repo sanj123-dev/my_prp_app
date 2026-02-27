@@ -25,7 +25,7 @@ type TransactionItem = {
   description: string;
   date: string;
   source: string;
-  transaction_type?: 'credit' | 'debit';
+  transaction_type?: 'credit' | 'debit' | 'self_transfer';
   sentiment?: string;
 };
 

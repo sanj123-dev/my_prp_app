@@ -69,6 +69,7 @@ class AssistantService:
         message: str,
         session_id: Optional[str],
         language: str,
+        source: str = "text",
     ) -> Dict[str, Any]:
         active_session = await self.start_or_reuse_session(
             user_id=user_id,
@@ -83,7 +84,10 @@ class AssistantService:
             session_id=active_session_id,
             role="user",
             content=message,
-            metadata={"idempotency_key": str(uuid.uuid4())},
+            metadata={
+                "idempotency_key": str(uuid.uuid4()),
+                "source": source,
+            },
         )
         await self.db.assistant_messages.insert_one(user_msg.model_dump())
 
@@ -112,6 +116,7 @@ class AssistantService:
                 "response_style": response_style,
                 "detected_user_tone": detected_tone,
                 "query_focus": query_focus,
+                "source": source,
             },
         )
         await self.db.assistant_messages.insert_one(assistant_msg.model_dump())

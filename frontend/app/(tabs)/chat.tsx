@@ -20,6 +20,7 @@ import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Speech from 'expo-speech';
 import { format } from 'date-fns';
+import { BarChart, LineChart, PieChart } from 'react-native-gifted-charts';
 
 type SpeechRecognitionModuleShape = {
   requestPermissionsAsync: () => Promise<{ granted: boolean; canAskAgain?: boolean }>;
@@ -70,6 +71,15 @@ interface Message {
   message: string;
   timestamp: string;
   source?: 'text' | 'voice';
+  visualization?: {
+    type: 'pie' | 'bar' | 'line' | 'table';
+    title: string;
+    subtitle?: string;
+    slices?: { value: number; text: string; color: string }[];
+    bars?: { value: number; label: string; frontColor: string }[];
+    trend?: { value: number; label: string }[];
+    rows?: { c1: string; c2: string; c3: string; c4?: string }[];
+  };
 }
 
 type AssistantLanguage = {
@@ -698,14 +708,162 @@ export default function Chat() {
     return String(response.data?.response ?? '');
   };
 
-  const appendLocalMessage = (role: 'user' | 'assistant', message: string) => {
+  const appendLocalMessage = (
+    role: 'user' | 'assistant',
+    message: string,
+    extra?: Partial<Pick<Message, 'visualization'>>
+  ) => {
     const localMessage: Message = {
       id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       role,
       message,
       timestamp: new Date().toISOString(),
+      ...extra,
     };
     setMessages((prev) => [...prev, localMessage]);
+  };
+
+  const classifyVisualizationRequest = (text: string): 'pie' | 'bar' | 'line' | 'table' | null => {
+    const q = (text || '').toLowerCase();
+    const wantsTable = q.includes('table') || q.includes('tabular');
+    if (wantsTable) return 'table';
+    const wantsLine = q.includes('line chart') || q.includes('trend') || q.includes('daily');
+    if (wantsLine) return 'line';
+    const wantsBar = q.includes('bar chart') || q.includes('compare category') || q.includes('comparison');
+    if (wantsBar) return 'bar';
+    const wantsPie = q.includes('pie chart') || q.includes('pie chat') || q.includes('pie');
+    if (wantsPie) return 'pie';
+    const hasChart = q.includes('chart') || q.includes('graph') || q.includes('visualize');
+    const hasCategory = q.includes('category') || q.includes('categorywise') || q.includes('category-wise');
+    const hasSpend = q.includes('spend') || q.includes('expense');
+    if (hasChart && hasCategory) return 'bar';
+    if (hasChart && hasSpend) return 'line';
+    return null;
+  };
+
+  const detectRange = (text: string): 'this_week' | 'this_month' => {
+    const q = (text || '').toLowerCase();
+    if (q.includes('this week') || q.includes('weekly') || q.includes('last 7 day') || q.includes('7 days')) {
+      return 'this_week';
+    }
+    return 'this_month';
+  };
+
+  const loadDebitRows = async (range: 'this_week' | 'this_month') => {
+    if (!EXPO_PUBLIC_BACKEND_URL || !userId) return null;
+    const response = await axios.get(`${EXPO_PUBLIC_BACKEND_URL}/api/transactions/${userId}`, {
+      params: { limit: 1000 },
+    });
+    const rows = Array.isArray(response.data) ? response.data : [];
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - 6);
+    weekStart.setHours(0, 0, 0, 0);
+
+    const totals: Record<string, number> = {};
+    const filteredRows: { date: string; category: string; description: string; amount: number }[] = [];
+    for (const row of rows) {
+      const txDate = new Date(row?.date || row?.created_at || Date.now());
+      if (Number.isNaN(txDate.getTime())) continue;
+      if (range === 'this_month' && txDate < monthStart) continue;
+      if (range === 'this_week' && txDate < weekStart) continue;
+      const txType = String(row?.transaction_type || 'debit').toLowerCase();
+      if (txType !== 'debit') continue;
+      const amount = Number(row?.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      const cat = String(row?.category || 'Other').trim() || 'Other';
+      totals[cat] = (totals[cat] || 0) + amount;
+      filteredRows.push({
+        date: format(txDate, 'dd MMM'),
+        category: cat,
+        description: String(row?.description || '').trim().slice(0, 28),
+        amount: Number(amount.toFixed(2)),
+      });
+    }
+
+    const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+    return { sorted, filteredRows, range };
+  };
+
+  const buildVisualization = async (
+    mode: 'pie' | 'bar' | 'line' | 'table',
+    range: 'this_week' | 'this_month'
+  ) => {
+    const payload = await loadDebitRows(range);
+    if (!payload) return null;
+    const { sorted, filteredRows } = payload;
+    if (!sorted.length) return null;
+    const rangeLabel = range === 'this_week' ? 'This Week' : 'This Month';
+
+    const palette = ['#4CAF50', '#2196F3', '#FF9800', '#E91E63', '#9C27B0', '#607D8B'];
+    const top = sorted.slice(0, 5);
+    const total = sorted.reduce((sum, [, amt]) => sum + amt, 0);
+
+    if (mode === 'bar') {
+      const bars = top.map(([cat, amt], i) => ({
+        value: Number(amt.toFixed(2)),
+        label: cat.slice(0, 8),
+        frontColor: palette[i % palette.length],
+      }));
+      return {
+        type: 'bar' as const,
+        title: `Category Comparison (${rangeLabel})`,
+        subtitle: `Total debit: \u20B9${total.toFixed(2)}`,
+        bars,
+      };
+    }
+
+    if (mode === 'line') {
+      const byDay: Record<string, number> = {};
+      for (const row of filteredRows) {
+        byDay[row.date] = (byDay[row.date] || 0) + row.amount;
+      }
+      const trend = Object.entries(byDay)
+        .slice(-10)
+        .map(([label, value]) => ({ label, value: Number(value.toFixed(2)) }));
+      return {
+        type: 'line' as const,
+        title: `Daily Spending Trend (${rangeLabel})`,
+        subtitle: `Total debit: \u20B9${total.toFixed(2)}`,
+        trend,
+      };
+    }
+
+    if (mode === 'table') {
+      const rows = filteredRows.slice(0, 8).map((r) => ({
+        c1: r.date,
+        c2: r.category,
+        c3: `\u20B9${r.amount.toFixed(0)}`,
+        c4: r.description,
+      }));
+      return {
+        type: 'table' as const,
+        title: `Recent Transactions (${rangeLabel})`,
+        subtitle: `Total debit: \u20B9${total.toFixed(2)}`,
+        rows,
+      };
+    }
+
+    const restTotal = sorted.slice(5).reduce((sum, [, amt]) => sum + amt, 0);
+    const slices = top.map(([cat, amt], i) => ({
+      value: Number(amt.toFixed(2)),
+      text: cat,
+      color: palette[i % palette.length],
+    }));
+    if (restTotal > 0) {
+      slices.push({
+        value: Number(restTotal.toFixed(2)),
+        text: 'Other',
+        color: '#8BC34A',
+      });
+    }
+    return {
+      type: 'pie' as const,
+      title: `${rangeLabel} Category-wise Spend`,
+      subtitle: `Total debit: \u20B9${total.toFixed(2)}`,
+      slices,
+    };
   };
 
   const sendMessage = async () => {
@@ -717,9 +875,18 @@ export default function Chat() {
     appendLocalMessage('user', userMessage);
 
     try {
-      const answer = await postChatMessage(userMessage, selectedLanguage, 'text');
-      if (answer) appendLocalMessage('assistant', answer);
-      void loadChat();
+      const vizMode = classifyVisualizationRequest(userMessage);
+      const range = detectRange(userMessage);
+      const [answer, chart] = await Promise.all([
+        postChatMessage(userMessage, selectedLanguage, 'text'),
+        vizMode ? buildVisualization(vizMode, range) : Promise.resolve(null),
+      ]);
+      if (answer || chart) {
+        const fallbackText = chart
+          ? 'I prepared a visual view of your spending data.'
+          : '';
+        appendLocalMessage('assistant', answer || fallbackText, chart ? { visualization: chart } : undefined);
+      }
       setTimeout(() => {
         scrollViewRef.current?.scrollToEnd({ animated: true });
       }, 120);
@@ -822,6 +989,7 @@ export default function Chat() {
       return;
     }
 
+    appendLocalMessage('user', question);
     isVoiceSubmittingRef.current = true;
     transcriptRef.current = '';
     try {
@@ -831,8 +999,9 @@ export default function Chat() {
     }
     setAssistantListening(false);
     setSending(true);
-    setAssistantStatus('Processing your voice...');
+    setAssistantStatus('Got it. Thinking...');
     try {
+      let usedHttpFallback = false;
       const answer = await new Promise<string>(async (resolve) => {
         const timeout = setTimeout(() => {
           pendingVoiceTextResolveRef.current = null;
@@ -850,13 +1019,19 @@ export default function Chat() {
           source: 'voice',
         });
         if (!sent) {
+          usedHttpFallback = true;
           const fallback = await postChatMessage(question, selectedLanguage, 'voice');
           wrappedResolve(fallback);
           return;
         }
       });
       if (answer) {
+        if (usedHttpFallback) {
+          appendLocalMessage('assistant', answer);
+        }
         await speakText(answer, selectedLanguage.locale);
+      } else {
+        setAssistantStatus('I did not catch a full response. Please try again.');
       }
     } catch (error) {
       console.error('Error processing assistant request:', error);
@@ -967,6 +1142,102 @@ export default function Chat() {
     );
   };
 
+  const renderVisualization = (viz: NonNullable<Message['visualization']>) => {
+    if (viz.type === 'pie') {
+      return (
+        <View style={styles.chartWrap}>
+          <Text style={styles.chartTitle}>{viz.title}</Text>
+          {viz.subtitle ? <Text style={styles.chartSubtitle}>{viz.subtitle}</Text> : null}
+          <View style={styles.chartRow}>
+            <PieChart
+              data={viz.slices || []}
+              donut
+              radius={72}
+              innerRadius={44}
+              showText
+              textColor="#fff"
+              textSize={11}
+              focusOnPress
+            />
+          </View>
+          <View style={styles.legendWrap}>
+            {(viz.slices || []).map((slice) => (
+              <View key={`${slice.text}-${slice.value}`} style={styles.legendItem}>
+                <View style={[styles.legendDot, { backgroundColor: slice.color }]} />
+                <Text style={styles.legendText}>{slice.text}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      );
+    }
+
+    if (viz.type === 'bar') {
+      return (
+        <View style={styles.chartWrap}>
+          <Text style={styles.chartTitle}>{viz.title}</Text>
+          {viz.subtitle ? <Text style={styles.chartSubtitle}>{viz.subtitle}</Text> : null}
+          <BarChart
+            data={viz.bars || []}
+            barWidth={20}
+            spacing={18}
+            roundedTop
+            yAxisTextStyle={{ color: '#aab7d8', fontSize: 10 }}
+            xAxisLabelTextStyle={{ color: '#d5e1ff', fontSize: 10 }}
+            noOfSections={4}
+            hideRules={false}
+            rulesColor="#27304a"
+          />
+        </View>
+      );
+    }
+
+    if (viz.type === 'line') {
+      return (
+        <View style={styles.chartWrap}>
+          <Text style={styles.chartTitle}>{viz.title}</Text>
+          {viz.subtitle ? <Text style={styles.chartSubtitle}>{viz.subtitle}</Text> : null}
+          <LineChart
+            data={viz.trend || []}
+            color="#4CAF50"
+            thickness={2}
+            dataPointsColor="#4CAF50"
+            yAxisTextStyle={{ color: '#aab7d8', fontSize: 10 }}
+            xAxisLabelTextStyle={{ color: '#d5e1ff', fontSize: 10 }}
+            rulesColor="#27304a"
+            hideRules={false}
+            adjustToWidth
+          />
+        </View>
+      );
+    }
+
+    if (viz.type === 'table') {
+      return (
+        <View style={styles.chartWrap}>
+          <Text style={styles.chartTitle}>{viz.title}</Text>
+          {viz.subtitle ? <Text style={styles.chartSubtitle}>{viz.subtitle}</Text> : null}
+          <View style={styles.tableHeader}>
+            <Text style={[styles.tableCell, { flex: 1.1 }]}>Date</Text>
+            <Text style={[styles.tableCell, { flex: 1.4 }]}>Category</Text>
+            <Text style={[styles.tableCell, { flex: 1.1, textAlign: 'right' }]}>Amount</Text>
+          </View>
+          {(viz.rows || []).map((row, idx) => (
+            <View key={`${row.c1}-${idx}`} style={styles.tableRow}>
+              <Text style={[styles.tableCell, { flex: 1.1 }]}>{row.c1}</Text>
+              <Text style={[styles.tableCell, { flex: 1.4 }]}>{row.c2}</Text>
+              <Text style={[styles.tableCell, { flex: 1.1, textAlign: 'right' }]}>{row.c3}</Text>
+            </View>
+          ))}
+        </View>
+      );
+    }
+
+    return (
+      null
+    );
+  };
+
   if (loading) {
     return (
       <SafeAreaView style={styles.container}>
@@ -1031,7 +1302,10 @@ export default function Chat() {
                   ]}
                 >
                   {msg.role === 'assistant' ? (
-                    renderAssistantMessage(msg.message)
+                    <>
+                      {msg.visualization ? renderVisualization(msg.visualization) : null}
+                      {renderAssistantMessage(msg.message)}
+                    </>
                   ) : (
                     <Text style={styles.messageText}>{msg.message}</Text>
                   )}
@@ -1269,6 +1543,68 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 4,
     borderWidth: 1,
     borderColor: '#2a2a3e',
+  },
+  chartWrap: {
+    backgroundColor: '#141a2b',
+    borderWidth: 1,
+    borderColor: '#2b3b60',
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 10,
+  },
+  chartTitle: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  chartSubtitle: {
+    color: '#b7c4e5',
+    fontSize: 12,
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  chartRow: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  legendWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginRight: 8,
+    marginBottom: 4,
+  },
+  legendDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  legendText: {
+    color: '#dbe4ff',
+    fontSize: 11,
+  },
+  tableHeader: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2d3956',
+    paddingBottom: 6,
+    marginBottom: 4,
+  },
+  tableRow: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#1f2a46',
+    paddingVertical: 6,
+  },
+  tableCell: {
+    color: '#e2eaff',
+    fontSize: 11,
   },
   messageText: {
     color: '#fff',

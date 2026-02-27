@@ -70,7 +70,8 @@ const isTransactionSms = (body: string) => {
   const keywords =
     /(debited|credited|spent|withdrawn|purchase|paid|payment|txn|transaction|pos|upi|neft|imps|atm|card)/i;
   const amountRegex = /(?:rs\.?|inr|\$|usd)\s*[\d,]+(?:\.\d{1,2})?/i;
-  return keywords.test(body) && amountRegex.test(body);
+  const excluded = /(recharge|validity|plan|otp|reminder|offer|promo|discount|bill due|due date)/i;
+  return keywords.test(body) && amountRegex.test(body) && !excluded.test(body);
 };
 
 const getRealtimeSmsModule = () => {
@@ -177,6 +178,10 @@ const importRealtimeSms = async (event: RealtimeSmsEvent) => {
       realtimeOnTransactionsCreated([response.data]);
     }
   } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 422) {
+      await rememberRealtimeFingerprint(fingerprint);
+      return;
+    }
     console.error('Realtime SMS import failed:', error);
   }
 };
@@ -346,16 +351,24 @@ export const syncSmsTransactions = async ({
         const timestamp = Number(sms.date ?? Date.now());
         latestSeenDate = Math.max(latestSeenDate, timestamp);
 
-        const response = await axios.post(
-          `${EXPO_PUBLIC_BACKEND_URL}/api/transactions/sms`,
-          {
-            user_id: userId,
-            sms_text: body,
-            date: new Date(timestamp).toISOString(),
+        try {
+          const response = await axios.post(
+            `${EXPO_PUBLIC_BACKEND_URL}/api/transactions/sms`,
+            {
+              user_id: userId,
+              sms_text: body,
+              date: new Date(timestamp).toISOString(),
+            }
+          );
+          created.push(response.data);
+          importedSet.add(smsId);
+        } catch (error) {
+          if (axios.isAxiosError(error) && error.response?.status === 422) {
+            importedSet.add(smsId);
+            continue;
           }
-        );
-        created.push(response.data);
-        importedSet.add(smsId);
+          throw error;
+        }
         if (onProgress) {
           onProgress({
             scannedCount,
