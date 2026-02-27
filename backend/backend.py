@@ -1324,27 +1324,63 @@ def _build_snapshot_prompt(snapshot: Dict[str, Any]) -> str:
 
 
 async def _load_recent_chat_context(user_id: str, limit: int = 8, session_id: Optional[str] = None) -> str:
-    query: Dict[str, Any] = {"user_id": user_id}
-    if session_id:
-        query["session_id"] = session_id
+    session = (session_id or "").strip()
+    assistant_query: Dict[str, Any] = {"user_id": user_id}
+    legacy_query: Dict[str, Any] = {"user_id": user_id}
+    if session:
+        assistant_query["session_id"] = session
+        legacy_query["session_id"] = session
 
-    rows = await db.chat_messages.find(query).sort("timestamp", -1).limit(limit).to_list(limit)
-    if not rows:
+    assistant_rows = await db.assistant_messages.find(assistant_query).sort("created_at", -1).limit(limit).to_list(limit)
+    legacy_rows = await db.chat_messages.find(legacy_query).sort("timestamp", -1).limit(limit).to_list(limit)
+
+    merged: List[Dict[str, Any]] = []
+    for row in assistant_rows:
+        merged.append(
+            {
+                "role": str(row.get("role", "user")).lower(),
+                "content": str(row.get("content", "")),
+                "_dt": _as_datetime(row.get("created_at")),
+            }
+        )
+    for row in legacy_rows:
+        merged.append(
+            {
+                "role": str(row.get("role", "user")).lower(),
+                "content": str(row.get("message", "")),
+                "_dt": _as_datetime(row.get("timestamp")),
+            }
+        )
+
+    merged.sort(key=lambda item: item.get("_dt", datetime.utcnow()))
+    merged = merged[-limit:]
+    if not merged and session:
+        # If current session is new, recover context from all prior sessions.
+        return await _load_recent_chat_context(user_id=user_id, limit=limit, session_id=None)
+    if not merged:
         return "No prior chat context."
 
-    rows.reverse()
     lines: List[str] = []
-    for row in rows:
+    seen: set[tuple[str, str]] = set()
+    for row in merged:
         role = str(row.get("role", "user")).lower()
         if role not in {"user", "assistant"}:
             continue
-        content = str(row.get("message", "")).replace("\n", " ").strip()
+        content = str(row.get("content", "")).replace("\n", " ").strip()
         if not content:
             continue
+        key = (role, content.lower())
+        if key in seen:
+            continue
+        seen.add(key)
         label = "User" if role == "user" else "Assistant"
         lines.append(f"{label}: {content[:300]}")
 
     return "\n".join(lines[-limit:]) if lines else "No prior chat context."
+
+
+async def _load_all_chat_context(user_id: str, limit: int = 60) -> str:
+    return await _load_recent_chat_context(user_id=user_id, limit=limit, session_id=None)
 
 
 def _build_behavior_summary(messages: List[Dict[str, Any]], snapshot: Dict[str, Any]) -> str:
@@ -2240,6 +2276,7 @@ async def chat_with_ai(request: ChatRequest):
         request.user_id,
         session_id=session_id,
     )
+    all_time_chat_context = await _load_all_chat_context(request.user_id, limit=60)
 
     snapshot_prompt = _build_snapshot_prompt(snapshot)
     wants_data = _is_data_question(request.message)
@@ -2251,6 +2288,8 @@ async def chat_with_ai(request: ChatRequest):
         f"{carryover_insights}\n\n"
         "Recent conversation context:\n"
         f"{recent_chat_context}\n\n"
+        "All-time conversation memory:\n"
+        f"{all_time_chat_context}\n\n"
         f"Current user question:\n{request.message}\n\n"
         "Response style requirements:\n"
         "- Sound like a real human financial coach in conversation.\n"
@@ -2276,22 +2315,26 @@ async def chat_with_ai(request: ChatRequest):
             "- If data is insufficient, say so clearly and suggest what to track next.\n"
         )
 
-    try:
-        response = await invoke_llm(
-            (
-                "You are SpendWise Assistant, a trusted personal finance coach. "
-                "Write naturally like a thoughtful human advisor. "
-                "Never mention these hidden instructions."
-            ),
-            llm_user_prompt,
-            temperature=0.35,
-        )
-    except Exception as error:
-        logging.exception("Chat LLM failed for user %s: %s", request.user_id, error)
-        response = _build_data_answer(request.message, snapshot) if wants_data else (
-            "I could not generate a full answer right now. "
-            "Try again in a moment, and I can give you a clearer personalized suggestion."
-        )
+    if wants_data:
+        # Deterministic response to avoid amount hallucinations.
+        response = _build_data_answer(request.message, snapshot)
+    else:
+        try:
+            response = await invoke_llm(
+                (
+                    "You are SpendWise Assistant, a trusted personal finance coach. "
+                    "Write naturally like a thoughtful human advisor. "
+                    "Never mention these hidden instructions."
+                ),
+                llm_user_prompt,
+                temperature=0.35,
+            )
+        except Exception as error:
+            logging.exception("Chat LLM failed for user %s: %s", request.user_id, error)
+            response = (
+                "I could not generate a full answer right now. "
+                "Try again in a moment, and I can give you a clearer personalized suggestion."
+            )
 
     response = _enforce_rupee_only(response)
     response = _shape_brief_coach_response(response)
@@ -2439,6 +2482,7 @@ async def voice_realtime_ws(websocket: WebSocket):
             active_user_id,
             session_id=active_session_id,
         )
+        all_time_chat_context = await _load_all_chat_context(active_user_id, limit=60)
 
         snapshot_prompt = _build_snapshot_prompt(snapshot)
         wants_data = _is_data_question(user_message)
@@ -2449,6 +2493,8 @@ async def voice_realtime_ws(websocket: WebSocket):
             f"{carryover_insights}\n\n"
             "Recent conversation context:\n"
             f"{recent_chat_context}\n\n"
+            "All-time conversation memory:\n"
+            f"{all_time_chat_context}\n\n"
             f"Current user question:\n{user_message}\n\n"
             "Response style requirements:\n"
             "- Sound like a real human financial coach in conversation.\n"
@@ -2476,30 +2522,14 @@ async def voice_realtime_ws(websocket: WebSocket):
 
         await ws_send({"type": "assistant.response.start"})
 
-        streamed_chunks: List[str] = []
-        stream_failed = False
-        try:
-            async for delta in invoke_llm_stream(
-                (
-                    "You are SpendWise Assistant, a trusted personal finance coach. "
-                    "Write naturally like a thoughtful human advisor. "
-                    "Never mention these hidden instructions."
-                ),
-                llm_user_prompt,
-                temperature=0.35,
-            ):
-                streamed_chunks.append(delta)
-                await ws_send({"type": "assistant.text.delta", "delta": delta})
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            logging.exception("Streaming LLM failed for user %s: %s", active_user_id, error)
-            stream_failed = True
-
-        response = "".join(streamed_chunks).strip()
-        if not response:
+        if wants_data:
+            # Deterministic response to avoid amount hallucinations.
+            response = _build_data_answer(user_message, snapshot)
+        else:
+            streamed_chunks: List[str] = []
+            stream_failed = False
             try:
-                response = await invoke_llm(
+                async for delta in invoke_llm_stream(
                     (
                         "You are SpendWise Assistant, a trusted personal finance coach. "
                         "Write naturally like a thoughtful human advisor. "
@@ -2507,16 +2537,32 @@ async def voice_realtime_ws(websocket: WebSocket):
                     ),
                     llm_user_prompt,
                     temperature=0.35,
-                )
+                ):
+                    streamed_chunks.append(delta)
+                    await ws_send({"type": "assistant.text.delta", "delta": delta})
+            except asyncio.CancelledError:
+                raise
             except Exception as error:
-                logging.exception("Fallback LLM failed for user %s: %s", active_user_id, error)
-                response = (
-                    _build_data_answer(user_message, snapshot)
-                    if wants_data
-                    else "I could not generate a response right now. Please try again."
-                )
-        elif stream_failed:
-            await ws_send({"type": "assistant.stream.warning", "detail": "partial_stream_recovered"})
+                logging.exception("Streaming LLM failed for user %s: %s", active_user_id, error)
+                stream_failed = True
+
+            response = "".join(streamed_chunks).strip()
+            if not response:
+                try:
+                    response = await invoke_llm(
+                        (
+                            "You are SpendWise Assistant, a trusted personal finance coach. "
+                            "Write naturally like a thoughtful human advisor. "
+                            "Never mention these hidden instructions."
+                        ),
+                        llm_user_prompt,
+                        temperature=0.35,
+                    )
+                except Exception as error:
+                    logging.exception("Fallback LLM failed for user %s: %s", active_user_id, error)
+                    response = "I could not generate a response right now. Please try again."
+            elif stream_failed:
+                await ws_send({"type": "assistant.stream.warning", "detail": "partial_stream_recovered"})
 
         response = _enforce_rupee_only(response)
         response = _shape_brief_coach_response(response)

@@ -16,6 +16,7 @@ import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { endOfMonth, format, isSameDay, isWithinInterval, startOfMonth } from 'date-fns';
+import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { formatINR } from '../../lib/currency';
@@ -45,6 +46,8 @@ type TransactionItem = {
   category: string;
   description: string;
   date: string;
+  bank_name?: string;
+  account_mask?: string;
   source?: string;
   transaction_type?: 'credit' | 'debit' | 'self_transfer';
 };
@@ -53,6 +56,36 @@ type InsightCard = {
   title: string;
   bullets: string[];
 };
+
+type CategorySpendCard = {
+  category: string;
+  amount: number;
+  percent: number;
+};
+
+type BankCardSummary = {
+  bankName: string;
+  last4: string;
+  totalDebit: number;
+  totalCredit: number;
+  txCount: number;
+};
+
+const CATEGORY_GRADIENTS = [
+  ['#1f4b99', '#17356d'],
+  ['#8a2f6e', '#5a1d46'],
+  ['#1a6d64', '#0f4a43'],
+  ['#91512b', '#6a3a1f'],
+  ['#5754c9', '#3d3ba4'],
+  ['#2d6b7e', '#204c59'],
+] as const;
+
+const BANK_GRADIENTS = [
+  ['#22305a', '#1a2442'],
+  ['#2c3f67', '#1c2946'],
+  ['#273a6f', '#1a2a4f'],
+  ['#32416c', '#222e53'],
+] as const;
 
 const FALLBACK_FINANCIAL_NEWS: FinancialNewsItem[] = [
   {
@@ -306,14 +339,69 @@ export default function Dashboard() {
     (item) => item.transaction_type !== 'credit'
   ).length;
   const avgTransaction = debitCount > 0 ? totalDebit / debitCount : 0;
-  const categories = useMemo(() => {
-    return currentMonthTransactions.reduce((acc: Record<string, number>, t: TransactionItem) => {
+
+  const categorySpendCards = useMemo<CategorySpendCard[]>(() => {
+    const buckets = currentMonthTransactions.reduce((acc: Record<string, number>, t: TransactionItem) => {
       if (t.transaction_type === 'credit') return acc;
       const key = String(t.category || 'Other');
       acc[key] = (acc[key] || 0) + Number(t.amount || 0);
       return acc;
     }, {});
+
+    return Object.entries(buckets)
+      .map(([category, amount]) => ({
+        category,
+        amount: Number(amount || 0),
+        percent: totalSpending > 0 ? (Number(amount || 0) / totalSpending) * 100 : 0,
+      }))
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 10);
   }, [currentMonthTransactions]);
+
+  const bankCards = useMemo<BankCardSummary[]>(() => {
+    const extractLast4 = (mask?: string) => {
+      const digits = String(mask || '').replace(/\D/g, '');
+      return digits.length > 0 ? digits.slice(-4) : '0000';
+    };
+
+    const bucket = new Map<string, BankCardSummary>();
+    for (const tx of currentMonthTransactions) {
+      const bankName = String(tx.bank_name || 'Bank').trim() || 'Bank';
+      const last4 = extractLast4(tx.account_mask);
+      const key = `${bankName.toLowerCase()}|${last4}`;
+      const current = bucket.get(key) || {
+        bankName,
+        last4,
+        totalDebit: 0,
+        totalCredit: 0,
+        txCount: 0,
+      };
+      const amount = Number(tx.amount || 0);
+      if (tx.transaction_type === 'credit') {
+        current.totalCredit += amount;
+      } else {
+        current.totalDebit += amount;
+      }
+      current.txCount += 1;
+      bucket.set(key, current);
+    }
+
+    return Array.from(bucket.values())
+      .sort((a, b) => b.totalDebit + b.totalCredit - (a.totalDebit + a.totalCredit))
+      .slice(0, 8);
+  }, [currentMonthTransactions]);
+
+  const getCategoryIcon = (category: string) => {
+    const key = String(category || '').toLowerCase();
+    if (key.includes('food') || key.includes('grocer')) return 'restaurant-outline';
+    if (key.includes('shop')) return 'bag-handle-outline';
+    if (key.includes('transport') || key.includes('travel')) return 'car-outline';
+    if (key.includes('bill') || key.includes('utility')) return 'receipt-outline';
+    if (key.includes('medical') || key.includes('health')) return 'medkit-outline';
+    if (key.includes('entertain')) return 'film-outline';
+    if (key.includes('transfer')) return 'swap-horizontal-outline';
+    return 'pricetag-outline';
+  };
 
   const insightCards = useMemo<InsightCard[]>(() => {
     const raw = (insights || '').trim();
@@ -405,67 +493,122 @@ export default function Dashboard() {
         )}
 
         <View style={styles.statsContainer}>
-          <View style={[styles.statCard, styles.primaryCard]}>
-            <Ionicons name="wallet" size={32} color="#fff" />
+          <LinearGradient
+            colors={['#2b5db6', '#21488f', '#193668']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={[styles.statCard, styles.primaryCard]}
+          >
+            <View style={styles.heroTopRow}>
+              <View style={styles.heroBadge}>
+                <Ionicons name="wallet-outline" size={16} color="#deebff" />
+                <Text style={styles.heroBadgeText}>This month</Text>
+              </View>
+              <Text style={styles.heroNetText}>
+                Net {formatINR(totalCredit - totalDebit)}
+              </Text>
+            </View>
             <Text style={styles.statValue}>{formatINR(totalSpending)}</Text>
-            <Text style={styles.statLabel}>
-              Total Debit Spend ({format(new Date(), 'MMMM yyyy')})
-            </Text>
-          </View>
+            <Text style={styles.statLabel}>Total Debit Spend</Text>
+          </LinearGradient>
 
           <View style={styles.statsRow}>
-            <View style={styles.smallStatCard}>
-              <Ionicons name="trending-up" size={24} color="#FF9800" />
-              <Text
-                style={styles.smallStatValue}
-                numberOfLines={1}
-                adjustsFontSizeToFit
-                minimumFontScale={0.72}
-              >
-                {formatINR(avgTransaction)}
-              </Text>
-              <Text style={styles.smallStatLabel}>Avg Debit</Text>
-            </View>
-
-            <View style={styles.smallStatCard}>
-              <Ionicons name="arrow-up-circle-outline" size={24} color="#4FC3F7" />
-              <Text
-                style={styles.smallStatValue}
-                numberOfLines={1}
-                adjustsFontSizeToFit
-                minimumFontScale={0.72}
-              >
+            <View style={[styles.smallStatCard, styles.smallStatCardBlue]}>
+              <Ionicons name="arrow-up-circle-outline" size={20} color="#88dcff" />
+              <Text style={styles.smallStatValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
                 {formatINR(totalCredit)}
               </Text>
               <Text style={styles.smallStatLabel}>Total Credit</Text>
             </View>
+
+            <View style={[styles.smallStatCard, styles.smallStatCardViolet]}>
+              <Ionicons name="trending-up" size={20} color="#ffd37d" />
+              <Text style={styles.smallStatValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                {formatINR(avgTransaction)}
+              </Text>
+              <Text style={styles.smallStatLabel}>Avg Debit</Text>
+            </View>
           </View>
         </View>
 
-        {Object.keys(categories).length > 0 && (
+        {categorySpendCards.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Spending by Category</Text>
-            {Object.entries(categories).map(([category, amount]: any) => {
-              const percentage = (amount / totalSpending) * 100;
-              return (
-                <View key={category} style={styles.categoryItem}>
-                  <View style={styles.categoryHeader}>
-                    <Text style={styles.categoryName}>{category}</Text>
-                    <Text style={styles.categoryAmount}>{formatINR(Number(amount))}</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.categoryCardsRow}
+            >
+              {categorySpendCards.map((item, index) => (
+                <LinearGradient
+                  key={`${item.category}-${index}`}
+                  colors={CATEGORY_GRADIENTS[index % CATEGORY_GRADIENTS.length]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.categorySpendCard}
+                >
+                  <View style={styles.categoryCardTop}>
+                    <View style={styles.categoryIconWrap}>
+                      <Ionicons name={getCategoryIcon(item.category) as any} size={16} color="#e7f1ff" />
+                    </View>
+                    <Text style={styles.categoryPercentBadge}>{item.percent.toFixed(0)}%</Text>
                   </View>
-                  <View style={styles.progressBarContainer}>
-                    <View
-                      style={[
-                        styles.progressBar,
-                        { width: `${Math.min(percentage, 100)}%` },
-                      ]}
-                    />
+                  <Text style={styles.categorySpendName} numberOfLines={1}>
+                    {item.category}
+                  </Text>
+                  <Text style={styles.categorySpendAmount}>{formatINR(item.amount)}</Text>
+                  <View style={styles.categoryMeterTrack}>
+                    <View style={[styles.categoryMeterFill, { width: `${Math.min(item.percent, 100)}%` }]} />
                   </View>
-                </View>
-              );
-            })}
+                </LinearGradient>
+              ))}
+            </ScrollView>
           </View>
         )}
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>Bank Cards</Text>
+            <Text style={styles.bankSubLabel}>Credit and debit totals</Text>
+          </View>
+          {bankCards.length === 0 ? (
+            <View style={styles.emptyCard}>
+              <Text style={styles.emptyCardText}>No bank-linked transactions found for this month.</Text>
+            </View>
+          ) : (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bankCardsRow}>
+              {bankCards.map((card, index) => (
+                <LinearGradient
+                  key={`${card.bankName}-${card.last4}-${index}`}
+                  colors={BANK_GRADIENTS[index % BANK_GRADIENTS.length]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.bankCard}
+                >
+                  <View style={styles.bankCardTop}>
+                    <View>
+                      <Text style={styles.bankNameText} numberOfLines={1}>{card.bankName}</Text>
+                      <Text style={styles.bankMaskText}>A/C ••••{card.last4}</Text>
+                    </View>
+                    <View style={styles.bankTxPill}>
+                      <Text style={styles.bankTxPillText}>{card.txCount} txns</Text>
+                    </View>
+                  </View>
+                  <View style={styles.bankTotalsRow}>
+                    <View>
+                      <Text style={styles.bankLabel}>Debit</Text>
+                      <Text style={styles.bankDebitValue}>{formatINR(card.totalDebit)}</Text>
+                    </View>
+                    <View>
+                      <Text style={styles.bankLabel}>Credit</Text>
+                      <Text style={styles.bankCreditValue}>{formatINR(card.totalCredit)}</Text>
+                    </View>
+                  </View>
+                </LinearGradient>
+              ))}
+            </ScrollView>
+          )}
+        </View>
 
         {insights && (
           <View style={styles.section}>
@@ -671,18 +814,42 @@ const styles = StyleSheet.create({
   },
   statCard: {
     backgroundColor: '#1a1a2e',
-    borderRadius: 16,
+    borderRadius: 20,
     padding: 24,
     marginBottom: 16,
     borderWidth: 1,
     borderColor: '#2a2a3e',
+    overflow: 'hidden',
   },
   primaryCard: {
-    backgroundColor: '#4CAF50',
-    borderColor: '#4CAF50',
+    borderColor: '#3d6fbe',
+  },
+  heroTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  heroBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(225,236,255,0.18)',
+  },
+  heroBadgeText: {
+    color: '#deebff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  heroNetText: {
+    color: '#d4e5ff',
+    fontSize: 12,
+    fontWeight: '700',
   },
   statValue: {
-    fontSize: 36,
+    fontSize: 34,
     fontWeight: 'bold',
     color: '#fff',
     marginTop: 12,
@@ -698,14 +865,22 @@ const styles = StyleSheet.create({
   },
   smallStatCard: {
     flex: 1,
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#1a1d35',
     borderRadius: 16,
     padding: 16,
     borderWidth: 1,
-    borderColor: '#2a2a3e',
+    borderColor: '#30385f',
+  },
+  smallStatCardBlue: {
+    backgroundColor: '#13263e',
+    borderColor: '#1f4b74',
+  },
+  smallStatCardViolet: {
+    backgroundColor: '#261c46',
+    borderColor: '#453482',
   },
   smallStatValue: {
-    fontSize: 24,
+    fontSize: 21,
     fontWeight: 'bold',
     color: '#fff',
     marginTop: 8,
@@ -738,35 +913,126 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
-  categoryItem: {
-    marginBottom: 16,
+  bankSubLabel: {
+    color: '#8fa1e0',
+    fontSize: 12,
+    fontWeight: '600',
   },
-  categoryHeader: {
+  categoryCardsRow: {
+    gap: 12,
+    paddingRight: 24,
+  },
+  categorySpendCard: {
+    width: 182,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    padding: 14,
+    gap: 10,
+  },
+  categoryCardTop: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
   },
-  categoryName: {
-    fontSize: 14,
-    color: '#fff',
-    fontWeight: '600',
+  categoryIconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.2)',
   },
-  categoryAmount: {
-    fontSize: 14,
-    color: '#4CAF50',
-    fontWeight: '600',
+  categoryPercentBadge: {
+    fontSize: 11,
+    color: '#f2f6ff',
+    fontWeight: '700',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
-  progressBarContainer: {
+  categorySpendName: {
+    fontSize: 13,
+    color: '#e9efff',
+    fontWeight: '700',
+  },
+  categorySpendAmount: {
+    fontSize: 18,
+    color: '#ffffff',
+    fontWeight: '800',
+  },
+  categoryMeterTrack: {
     height: 8,
-    backgroundColor: '#2a2a3e',
-    borderRadius: 4,
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderRadius: 999,
     overflow: 'hidden',
   },
-  progressBar: {
+  categoryMeterFill: {
     height: '100%',
-    backgroundColor: '#4CAF50',
-    borderRadius: 4,
+    backgroundColor: '#f9fdff',
+    borderRadius: 999,
+  },
+  bankCardsRow: {
+    gap: 12,
+    paddingRight: 24,
+  },
+  bankCard: {
+    width: 238,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#3d4f7e',
+    padding: 14,
+    gap: 14,
+  },
+  bankCardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  bankNameText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  bankMaskText: {
+    color: '#bfcdef',
+    fontSize: 12,
+    marginTop: 4,
+    fontWeight: '600',
+  },
+  bankTxPill: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
+  bankTxPillText: {
+    color: '#e6eeff',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  bankTotalsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
+  bankLabel: {
+    color: '#9eb2e1',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  bankDebitValue: {
+    color: '#ffd0d0',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  bankCreditValue: {
+    color: '#c4f1ff',
+    fontSize: 15,
+    fontWeight: '800',
   },
   insightsHeader: {
     flexDirection: 'row',

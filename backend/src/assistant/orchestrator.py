@@ -1036,16 +1036,15 @@ class FinalResponseAgent(BaseAgent):
 
         debit = self._format_rupee(snapshot.get("total_debit", 0.0))
         credit = self._format_rupee(snapshot.get("total_credit", 0.0))
+        window_days = int(snapshot.get("window_days", 45) or 45)
+        tx_count = int(snapshot.get("transaction_count", 0) or 0)
         line1 = f"Exact summary from your tracked data: Debit {debit}, Credit {credit}."
         if show_net:
             line1 = (
                 f"Exact summary from your tracked data: Debit {debit}, Credit {credit}, "
                 f"Net cashflow {self._format_rupee(snapshot.get('net_cashflow', 0.0))}."
             )
-        line2 = (
-            f"This month: debit {self._format_rupee(snapshot.get('total_debit', 0.0))}, "
-            f"credit {self._format_rupee(snapshot.get('total_credit', 0.0))}."
-        )
+        line2 = f"Window used: last {window_days} days, {tx_count} transactions."
         top_categories = list(snapshot.get("top_categories", []))
         if top_categories:
             top = top_categories[0]
