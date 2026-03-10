@@ -3,6 +3,7 @@ import { ActivityIndicator, Platform, View } from 'react-native';
 import { Tabs, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { getSavedUserId } from '../../lib/auth';
+import { theme } from '../../theme/tokens';
 
 export default function TabLayout() {
   const [checkingSession, setCheckingSession] = useState(true);
@@ -22,8 +23,15 @@ export default function TabLayout() {
 
   if (checkingSession) {
     return (
-      <View style={{ flex: 1, backgroundColor: '#0f0f1e', justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" color="#4CAF50" />
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: theme.colors.backgroundBase,
+          justifyContent: 'center',
+          alignItems: 'center',
+        }}
+      >
+        <ActivityIndicator size="large" color={theme.colors.accent} />
       </View>
     );
   }
@@ -32,11 +40,11 @@ export default function TabLayout() {
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: '#4CAF50',
-        tabBarInactiveTintColor: '#666',
+        tabBarActiveTintColor: theme.colors.accent,
+        tabBarInactiveTintColor: theme.colors.tabInactive,
         tabBarStyle: {
-          backgroundColor: '#1a1a2e',
-          borderTopColor: '#2a2a3e',
+          backgroundColor: theme.colors.tabBackground,
+          borderTopColor: theme.colors.borderSoft,
           borderTopWidth: 1,
           paddingBottom: Platform.OS === 'android' ? 14 : 10,
           paddingTop: 8,
@@ -45,7 +53,8 @@ export default function TabLayout() {
         },
         tabBarLabelStyle: {
           fontSize: 12,
-          fontWeight: '600',
+          fontWeight: '700',
+          fontFamily: theme.typography.display,
         },
       }}
     >

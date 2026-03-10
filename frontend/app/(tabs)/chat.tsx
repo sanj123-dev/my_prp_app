@@ -21,6 +21,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Speech from 'expo-speech';
 import { format } from 'date-fns';
 import { BarChart, LineChart, PieChart } from 'react-native-gifted-charts';
+import { useAssistantChat } from '../../hooks/useAssistantChat';
 
 type SpeechRecognitionModuleShape = {
   requestPermissionsAsync: () => Promise<{ granted: boolean; canAskAgain?: boolean }>;
@@ -113,6 +114,7 @@ export default function Chat() {
   const [selectedLanguage, setSelectedLanguage] = useState<AssistantLanguage>(
     ASSISTANT_LANGUAGES[0]
   );
+  const assistantClient = useAssistantChat();
 
   const scrollViewRef = useRef<ScrollView>(null);
   const pulse = useRef(new Animated.Value(1)).current;
@@ -666,10 +668,8 @@ export default function Chat() {
       if (savedUserId) {
         setUserId(savedUserId);
         await ensureSession(savedUserId);
-        const response = await axios.get(
-          `${EXPO_PUBLIC_BACKEND_URL}/api/chat/${savedUserId}`
-        );
-        const visibleMessages = (response.data || []).filter(
+        const history = await assistantClient.getHistory(savedUserId);
+        const visibleMessages = history.filter(
           (msg: Message) => (msg.source || 'text') !== 'voice'
         );
         setMessages(visibleMessages);
@@ -683,19 +683,19 @@ export default function Chat() {
 
   const ensureSession = async (savedUserId: string) => {
     const existingSessionId = await AsyncStorage.getItem(CHAT_SESSION_ID_KEY);
-    const response = await axios.post(`${EXPO_PUBLIC_BACKEND_URL}/api/chat/session/start`, {
-      user_id: savedUserId,
+    const result = await assistantClient.startSession({
+      userId: savedUserId,
       language: selectedLanguage.promptName,
-      existing_session_id: existingSessionId,
+      existingSessionId: existingSessionId || undefined,
     });
 
-    const nextSessionId = String(response.data?.session_id || '');
+    const nextSessionId = String(result.sessionId || '');
     if (nextSessionId) {
       setSessionId(nextSessionId);
       await AsyncStorage.setItem(CHAT_SESSION_ID_KEY, nextSessionId);
     }
 
-    setCarryoverInsights(String(response.data?.carryover_insights || ''));
+    setCarryoverInsights(String(result.carryoverInsights || ''));
   };
 
   const postChatMessage = async (
@@ -709,21 +709,21 @@ export default function Chat() {
       activeSessionId = await AsyncStorage.getItem(CHAT_SESSION_ID_KEY) || '';
     }
 
-    const response = await axios.post(`${EXPO_PUBLIC_BACKEND_URL}/api/chat`, {
-      user_id: userId,
+    const result = await assistantClient.sendMessage({
+      userId,
       message,
       language: language.promptName,
-      session_id: activeSessionId || undefined,
+      sessionId: activeSessionId || undefined,
       source,
     });
 
-    if (response.data?.session_id && String(response.data.session_id) !== sessionId) {
-      const newSessionId = String(response.data.session_id);
+    if (result.sessionId && String(result.sessionId) !== sessionId) {
+      const newSessionId = String(result.sessionId);
       setSessionId(newSessionId);
       await AsyncStorage.setItem(CHAT_SESSION_ID_KEY, newSessionId);
     }
 
-    return String(response.data?.response ?? '');
+    return String(result.response ?? '');
   };
 
   const appendLocalMessage = (

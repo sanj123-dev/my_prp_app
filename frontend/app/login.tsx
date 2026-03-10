@@ -11,11 +11,12 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Link, router } from 'expo-router';
+import { AuthShell } from '../components/auth/AuthShell';
 import { login, saveUserId } from '../lib/auth';
 import { requestSmsPermission, setSmsAuthTrigger } from '../lib/smsSync';
+import { theme } from '../theme/tokens';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -46,138 +47,112 @@ export default function LoginScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthShell
+      icon="wallet-outline"
+      title="SpendWise"
+      subtitle="Your AI money coach. Secure sign in to continue."
+    >
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.keyboardContainer}
       >
-        <ScrollView contentContainerStyle={styles.scrollContent}>
-          <View style={styles.card}>
-            <Ionicons name="wallet" size={72} color="#4CAF50" />
-            <Text style={styles.title}>Welcome Back</Text>
-            <Text style={styles.subtitle}>Login to continue tracking your money</Text>
+        <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+          <View style={styles.inputContainer}>
+            <Ionicons name="mail-outline" size={20} color={theme.colors.textMuted} style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Email"
+              placeholderTextColor={theme.colors.textMuted}
+              value={email}
+              onChangeText={setEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+            />
+          </View>
 
-            <View style={styles.inputContainer}>
-              <Ionicons name="mail" size={20} color="#666" style={styles.inputIcon} />
-              <TextInput
-                style={styles.input}
-                placeholder="Email"
-                placeholderTextColor="#999"
-                value={email}
-                onChangeText={setEmail}
-                keyboardType="email-address"
-                autoCapitalize="none"
-              />
-            </View>
+          <View style={styles.inputContainer}>
+            <Ionicons name="lock-closed-outline" size={20} color={theme.colors.textMuted} style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Password"
+              placeholderTextColor={theme.colors.textMuted}
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+            />
+          </View>
 
-            <View style={styles.inputContainer}>
-              <Ionicons name="lock-closed" size={20} color="#666" style={styles.inputIcon} />
-              <TextInput
-                style={styles.input}
-                placeholder="Password"
-                placeholderTextColor="#999"
-                value={password}
-                onChangeText={setPassword}
-                secureTextEntry
-              />
-            </View>
+          <TouchableOpacity style={styles.primaryButton} onPress={handleLogin} disabled={submitting}>
+            {submitting ? (
+              <ActivityIndicator color={theme.colors.accentContrast} />
+            ) : (
+              <Text style={styles.primaryButtonText}>Login</Text>
+            )}
+          </TouchableOpacity>
 
-            <TouchableOpacity style={styles.primaryButton} onPress={handleLogin} disabled={submitting}>
-              {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryButtonText}>Login</Text>}
-            </TouchableOpacity>
-
-            <View style={styles.footerRow}>
-              <Text style={styles.footerText}>Don&apos;t have an account?</Text>
-              <Link href="/signup" style={styles.footerLink}>
-                Sign up
-              </Link>
-            </View>
+          <View style={styles.footerRow}>
+            <Text style={styles.footerText}>Don&apos;t have an account?</Text>
+            <Link href="/signup" style={styles.footerLink}>
+              Sign up
+            </Link>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </AuthShell>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0f0f1e',
-  },
   keyboardContainer: {
-    flex: 1,
+    width: '100%',
   },
   scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    padding: 24,
-  },
-  card: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-    padding: 24,
-    alignItems: 'center',
-  },
-  title: {
-    color: '#fff',
-    fontSize: 30,
-    fontWeight: '700',
-    marginTop: 20,
-  },
-  subtitle: {
-    color: '#999',
-    fontSize: 15,
-    marginTop: 6,
-    marginBottom: 24,
-    textAlign: 'center',
+    gap: theme.spacing.sm,
   },
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     width: '100%',
     borderWidth: 1,
-    borderColor: '#2a2a3e',
-    backgroundColor: '#0f0f1e',
-    borderRadius: 12,
+    borderColor: theme.colors.borderSoft,
+    backgroundColor: 'rgba(5, 16, 34, 0.65)',
+    borderRadius: theme.radii.md,
     paddingHorizontal: 14,
-    marginBottom: 14,
   },
   inputIcon: {
     marginRight: 10,
   },
   input: {
     flex: 1,
-    color: '#fff',
+    color: theme.colors.textPrimary,
     fontSize: 16,
     paddingVertical: 14,
   },
   primaryButton: {
     width: '100%',
-    borderRadius: 12,
-    backgroundColor: '#4CAF50',
+    borderRadius: theme.radii.md,
+    backgroundColor: theme.colors.accent,
     alignItems: 'center',
     paddingVertical: 14,
-    marginTop: 8,
+    marginTop: theme.spacing.sm,
   },
   primaryButtonText: {
-    color: '#fff',
+    color: theme.colors.accentContrast,
     fontSize: 16,
-    fontWeight: '700',
+    fontWeight: '800',
   },
   footerRow: {
-    marginTop: 18,
+    marginTop: theme.spacing.md,
     flexDirection: 'row',
-    alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
   },
   footerText: {
-    color: '#9aa0b4',
+    color: theme.colors.textSecondary,
     fontSize: 14,
   },
   footerLink: {
-    color: '#4CAF50',
+    color: theme.colors.info,
     fontSize: 14,
     fontWeight: '700',
   },

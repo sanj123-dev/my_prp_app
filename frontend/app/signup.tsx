@@ -11,11 +11,12 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Link, router } from 'expo-router';
+import { AuthShell } from '../components/auth/AuthShell';
 import { saveUserId, signup } from '../lib/auth';
 import { requestSmsPermission, setSmsAuthTrigger } from '../lib/smsSync';
+import { theme } from '../theme/tokens';
 
 export default function SignupScreen() {
   const [name, setName] = useState('');
@@ -55,165 +56,135 @@ export default function SignupScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <AuthShell
+      icon="person-add-outline"
+      title="Create Account"
+      subtitle="Build your automated money OS in under one minute."
+    >
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.keyboardContainer}
       >
-        <ScrollView contentContainerStyle={styles.scrollContent}>
-          <View style={styles.card}>
-            <Ionicons name="person-add" size={72} color="#4CAF50" />
-            <Text style={styles.title}>Create Account</Text>
-            <Text style={styles.subtitle}>Sign up and start tracking smarter</Text>
+        <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+          <View style={styles.inputContainer}>
+            <Ionicons name="person-outline" size={20} color={theme.colors.textMuted} style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Full name"
+              placeholderTextColor={theme.colors.textMuted}
+              value={name}
+              onChangeText={setName}
+            />
+          </View>
 
-            <View style={styles.inputContainer}>
-              <Ionicons name="person" size={20} color="#666" style={styles.inputIcon} />
-              <TextInput
-                style={styles.input}
-                placeholder="Full name"
-                placeholderTextColor="#999"
-                value={name}
-                onChangeText={setName}
-              />
-            </View>
+          <View style={styles.inputContainer}>
+            <Ionicons name="mail-outline" size={20} color={theme.colors.textMuted} style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Email"
+              placeholderTextColor={theme.colors.textMuted}
+              value={email}
+              onChangeText={setEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+            />
+          </View>
 
-            <View style={styles.inputContainer}>
-              <Ionicons name="mail" size={20} color="#666" style={styles.inputIcon} />
-              <TextInput
-                style={styles.input}
-                placeholder="Email"
-                placeholderTextColor="#999"
-                value={email}
-                onChangeText={setEmail}
-                keyboardType="email-address"
-                autoCapitalize="none"
-              />
-            </View>
+          <View style={styles.inputContainer}>
+            <Ionicons name="lock-closed-outline" size={20} color={theme.colors.textMuted} style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Password"
+              placeholderTextColor={theme.colors.textMuted}
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+            />
+          </View>
 
-            <View style={styles.inputContainer}>
-              <Ionicons name="lock-closed" size={20} color="#666" style={styles.inputIcon} />
-              <TextInput
-                style={styles.input}
-                placeholder="Password"
-                placeholderTextColor="#999"
-                value={password}
-                onChangeText={setPassword}
-                secureTextEntry
-              />
-            </View>
+          <View style={styles.inputContainer}>
+            <Ionicons name="shield-checkmark-outline" size={20} color={theme.colors.textMuted} style={styles.inputIcon} />
+            <TextInput
+              style={styles.input}
+              placeholder="Confirm password"
+              placeholderTextColor={theme.colors.textMuted}
+              value={confirmPassword}
+              onChangeText={setConfirmPassword}
+              secureTextEntry
+            />
+          </View>
 
-            <View style={styles.inputContainer}>
-              <Ionicons name="shield-checkmark" size={20} color="#666" style={styles.inputIcon} />
-              <TextInput
-                style={styles.input}
-                placeholder="Confirm password"
-                placeholderTextColor="#999"
-                value={confirmPassword}
-                onChangeText={setConfirmPassword}
-                secureTextEntry
-              />
-            </View>
+          <TouchableOpacity style={styles.primaryButton} onPress={handleSignup} disabled={submitting}>
+            {submitting ? (
+              <ActivityIndicator color={theme.colors.accentContrast} />
+            ) : (
+              <Text style={styles.primaryButtonText}>Create Account</Text>
+            )}
+          </TouchableOpacity>
 
-            <TouchableOpacity style={styles.primaryButton} onPress={handleSignup} disabled={submitting}>
-              {submitting ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.primaryButtonText}>Create Account</Text>
-              )}
-            </TouchableOpacity>
-
-            <View style={styles.footerRow}>
-              <Text style={styles.footerText}>Already have an account?</Text>
-              <Link href="/login" style={styles.footerLink}>
-                Login
-              </Link>
-            </View>
+          <View style={styles.footerRow}>
+            <Text style={styles.footerText}>Already have an account?</Text>
+            <Link href="/login" style={styles.footerLink}>
+              Login
+            </Link>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </AuthShell>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0f0f1e',
-  },
   keyboardContainer: {
-    flex: 1,
+    width: '100%',
   },
   scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    padding: 24,
-  },
-  card: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-    padding: 24,
-    alignItems: 'center',
-  },
-  title: {
-    color: '#fff',
-    fontSize: 30,
-    fontWeight: '700',
-    marginTop: 20,
-  },
-  subtitle: {
-    color: '#999',
-    fontSize: 15,
-    marginTop: 6,
-    marginBottom: 24,
-    textAlign: 'center',
+    gap: theme.spacing.sm,
   },
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     width: '100%',
     borderWidth: 1,
-    borderColor: '#2a2a3e',
-    backgroundColor: '#0f0f1e',
-    borderRadius: 12,
+    borderColor: theme.colors.borderSoft,
+    backgroundColor: 'rgba(5, 16, 34, 0.65)',
+    borderRadius: theme.radii.md,
     paddingHorizontal: 14,
-    marginBottom: 14,
   },
   inputIcon: {
     marginRight: 10,
   },
   input: {
     flex: 1,
-    color: '#fff',
+    color: theme.colors.textPrimary,
     fontSize: 16,
     paddingVertical: 14,
   },
   primaryButton: {
     width: '100%',
-    borderRadius: 12,
-    backgroundColor: '#4CAF50',
+    borderRadius: theme.radii.md,
+    backgroundColor: theme.colors.accent,
     alignItems: 'center',
     paddingVertical: 14,
-    marginTop: 8,
+    marginTop: theme.spacing.sm,
   },
   primaryButtonText: {
-    color: '#fff',
+    color: theme.colors.accentContrast,
     fontSize: 16,
-    fontWeight: '700',
+    fontWeight: '800',
   },
   footerRow: {
-    marginTop: 18,
+    marginTop: theme.spacing.md,
     flexDirection: 'row',
-    alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
   },
   footerText: {
-    color: '#9aa0b4',
+    color: theme.colors.textSecondary,
     fontSize: 14,
   },
   footerLink: {
-    color: '#4CAF50',
+    color: theme.colors.info,
     fontSize: 14,
     fontWeight: '700',
   },

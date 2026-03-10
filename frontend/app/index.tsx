@@ -2,6 +2,8 @@ import { useEffect } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { router } from 'expo-router';
 import { getSavedUserId } from '../lib/auth';
+import { GradientSurface } from '../components/layout/GradientSurface';
+import { theme } from '../theme/tokens';
 
 export default function Index() {
   useEffect(() => {
@@ -18,18 +20,18 @@ export default function Index() {
   }, []);
 
   return (
-    <View style={styles.container}>
-      <ActivityIndicator size="large" color="#4CAF50" />
-    </View>
+    <GradientSurface>
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color={theme.colors.accent} />
+      </View>
+    </GradientSurface>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0f0f1e',
     justifyContent: 'center',
     alignItems: 'center',
   },
 });
-

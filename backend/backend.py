@@ -1,6 +1,9 @@
 from fastapi import FastAPI, APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
@@ -24,6 +27,12 @@ from openai import AsyncOpenAI
 from src.goals import create_goal_router, init_goal_module
 from src.assistant import create_assistant_router, init_assistant_module
 from src.assistant.service import AssistantService
+from src.transactions import (
+    _init_bank_reference_data,
+    _init_transaction_learning_infra,
+    create_transactions_router,
+    init_transaction_dependencies,
+)
 
 # ==================== INIT ====================
 
@@ -51,58 +60,30 @@ ELEVENLABS_API_KEY = (os.environ.get("ELEVENLABS_API_KEY", "") or "").strip()
 ELEVENLABS_VOICE_ID = (os.environ.get("ELEVENLABS_VOICE_ID", "") or "").strip()
 _assistant_service: Optional[AssistantService] = None
 
-ALLOWED_CATEGORIES = {
-    "Food",
-    "Groceries",
-    "Transport",
-    "Shopping",
-    "Bills",
-    "Entertainment",
-    "Health",
-    "Medical",
-    "Education",
-    "Travel",
-    "Transfer",
-    "Other",
-}
 
-BANK_REFERENCE_DATA = [
-    {"code": "SBI", "name": "State Bank of India"},
-    {"code": "HDFC", "name": "HDFC Bank"},
-    {"code": "ICICI", "name": "ICICI Bank"},
-    {"code": "AXIS", "name": "Axis Bank"},
-    {"code": "KOTAK", "name": "Kotak Mahindra Bank"},
-    {"code": "PNB", "name": "Punjab National Bank"},
-    {"code": "BOB", "name": "Bank of Baroda"},
-    {"code": "YES", "name": "Yes Bank"},
-    {"code": "IDFC", "name": "IDFC First Bank"},
-    {"code": "INDUSIND", "name": "IndusInd Bank"},
-    {"code": "CANARA", "name": "Canara Bank"},
-    {"code": "UNION", "name": "Union Bank of India"},
-    {"code": "PAYTM", "name": "Paytm Payments Bank"},
-    {"code": "AIRTEL", "name": "Airtel Payments Bank"},
-    {"code": "FEDERAL", "name": "Federal Bank"},
-]
+def _parse_cors_origins() -> List[str]:
+    raw = (os.environ.get("CORS_ALLOW_ORIGINS", "") or "").strip()
+    if not raw:
+        return [
+            "http://localhost:19006",
+            "http://localhost:8081",
+            "http://127.0.0.1:19006",
+            "http://127.0.0.1:8081",
+        ]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
-BANK_KEYWORDS = {
-    "sbi",
-    "state bank",
-    "hdfc",
-    "icici",
-    "axis",
-    "kotak",
-    "pnb",
-    "bank of baroda",
-    "bob",
-    "yes bank",
-    "idfc",
-    "indusind",
-    "canara",
-    "union bank",
-    "federal bank",
-    "paytm payments bank",
-    "airtel payments bank",
-}
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
 
 # ==================== LLM HELPER ====================
 
@@ -121,6 +102,16 @@ async def invoke_llm(
         ],
     )
     return response.choices[0].message.content.strip()
+
+
+init_transaction_dependencies(
+    db,
+    lambda system_prompt, user_prompt, temperature=0.3: invoke_llm(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=temperature,
+    ),
+)
 
 
 async def invoke_llm_stream(
@@ -191,65 +182,6 @@ def _synthesize_voice_audio_b64(text: str, language: str) -> Optional[Dict[str, 
         return None
 
 # ==================== MODELS ====================
-
-class Transaction(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: str
-    amount: float
-    category: str
-    description: str
-    date: datetime
-    source: str
-    transaction_type: str = "debit"
-    sentiment: Optional[str] = None
-    ref_id: Optional[str] = None
-    merchant_key: Optional[str] = None
-    merchant_name: Optional[str] = None
-    bank_name: Optional[str] = None
-    account_mask: Optional[str] = None
-    upi_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-
-class TransactionCreate(BaseModel):
-    user_id: str
-    amount: float
-    description: str
-    date: Optional[datetime] = None
-    transaction_type: Optional[str] = None
-
-class SMSTransactionRequest(BaseModel):
-    user_id: str
-    sms_text: str
-    date: Optional[datetime] = None
-
-class TransactionCategoryUpdate(BaseModel):
-    user_id: str
-    category: str
-    apply_to_similar: bool = False
-
-class TransactionAmountUpdate(BaseModel):
-    user_id: str
-    amount: float
-
-class TransactionUpdateRequest(BaseModel):
-    user_id: str
-    amount: Optional[float] = None
-    category: Optional[str] = None
-    transaction_type: Optional[str] = None
-    description: Optional[str] = None
-    date: Optional[datetime] = None
-
-
-class TransactionSimilarityRequest(BaseModel):
-    user_id: str
-
-
-class TransactionSimilarityResponse(BaseModel):
-    match_count: int
-    merchant_key: Optional[str] = None
-    upi_id: Optional[str] = None
-    sample_descriptions: List[str] = []
-
 class ChatRequest(BaseModel):
     user_id: str
     message: str
@@ -384,491 +316,6 @@ class FinancialNewsItem(BaseModel):
     sentiment: str = "neutral"
 
 # ==================== AI FUNCTIONS ====================
-
-async def categorize_transaction_with_ai(text: str, amount: float) -> Dict[str, str]:
-    rule_based = _categorize_transaction_rule_based(text)
-    if rule_based:
-        return {"category": rule_based, "sentiment": "neutral"}
-
-    try:
-        prompt = f"""
-Analyze transaction:
-Amount: ${amount}
-Description: {text}
-
-Return ONLY JSON:
-{{
- "category":"Food|Groceries|Transport|Shopping|Bills|Entertainment|Health|Medical|Education|Travel|Transfer|Other",
- "sentiment":"positive|neutral|negative"
-}}
-"""
-
-        response = await invoke_llm(
-            "You categorize financial transactions.",
-            prompt,
-            temperature=0.1,
-        )
-
-        cleaned = response.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(cleaned)
-        normalized_category = _normalize_category_name(str(parsed.get("category", "Other")))
-        if normalized_category not in ALLOWED_CATEGORIES:
-            normalized_category = "Other"
-        return {
-            "category": normalized_category,
-            "sentiment": str(parsed.get("sentiment", "neutral")).strip().lower() or "neutral",
-        }
-
-    except Exception as e:
-        logging.error(e)
-        return {"category": "Other", "sentiment": "neutral"}
-
-
-def _categorize_transaction_rule_based(text: str) -> Optional[str]:
-    lowered = (text or "").lower()
-    transfer_patterns = [
-        "to own",
-        "self transfer",
-        "fund transfer to self",
-        "to self",
-        "own account",
-        "a/c transfer",
-        "account transfer",
-    ]
-    if any(pattern in lowered for pattern in transfer_patterns):
-        return "Transfer"
-    if any(pattern in lowered for pattern in ["grocery", "supermarket", "mart", "grocers"]):
-        return "Groceries"
-    if any(pattern in lowered for pattern in ["pharmacy", "medicine", "hospital", "medical"]):
-        return "Medical"
-    if any(pattern in lowered for pattern in ["neft", "imps", "rtgs", "bank transfer"]):
-        return "Transfer"
-    return None
-
-
-def _normalize_category_name(value: str) -> str:
-    raw = (value or "").strip().lower()
-    mapping = {
-        "self transfer": "Transfer",
-        "self_transfer": "Transfer",
-        "transfer": "Transfer",
-        "medical": "Medical",
-        "medicine": "Medical",
-        "health": "Health",
-        "groceries": "Groceries",
-        "grocery": "Groceries",
-    }
-    if raw in mapping:
-        return mapping[raw]
-    return (value or "").strip().title() or "Other"
-
-
-def _is_transaction_sms(text: str) -> bool:
-    sms = (text or "").strip().lower()
-    if not sms:
-        return False
-
-    amount_regex = re.compile(r"(?:rs\.?|inr|mrp|\$)\s*[0-9][0-9,]*(?:\.[0-9]+)?")
-    has_amount = bool(amount_regex.search(sms))
-    has_txn_signal = bool(
-        re.search(
-            r"\b(debited|credited|withdrawn|spent|purchase|paid|payment|upi|neft|imps|atm|card|txn|transaction|received)\b",
-            sms,
-        )
-    )
-    recharge_or_reminder = bool(
-        re.search(
-            r"\b(recharge|validity|plan|otp|reminder|bill due|due date|promo|offer|discount|loan offer|insurance)\b",
-            sms,
-        )
-    )
-    return has_amount and has_txn_signal and not recharge_or_reminder
-
-
-def _parse_datetime_from_string(value: Optional[str]) -> Optional[datetime]:
-    raw = (value or "").strip()
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
-async def _extract_sms_fields_with_ai(text: str) -> Dict[str, Any]:
-    prompt = f"""
-Extract transaction info from this SMS and return STRICT JSON only.
-
-SMS:
-{text}
-
-Return:
-{{
-  "is_transaction": true|false,
-  "merchant_name": "string|null",
-  "amount": number|null,
-  "transaction_datetime": "ISO-8601 or null",
-  "upi_id": "string|null",
-  "reference_id": "string|null",
-  "bank_name": "string|null",
-  "category": "Food|Groceries|Transport|Shopping|Bills|Entertainment|Health|Medical|Education|Travel|Transfer|Other|null",
-  "transaction_type": "credit|debit|self_transfer|null"
-}}
-"""
-    try:
-        response = await invoke_llm(
-            "You extract structured financial transaction entities from SMS. Return strict JSON only.",
-            prompt,
-            temperature=0.0,
-        )
-        cleaned = response.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(cleaned)
-        raw_type = str(parsed.get("transaction_type", "")).strip().lower()
-        normalized_type = (
-            normalize_transaction_type(raw_type) if raw_type else None
-        )
-        raw_category = parsed.get("category")
-        normalized_category = _normalize_category_name(str(raw_category)) if raw_category else None
-        if normalized_category and normalized_category not in ALLOWED_CATEGORIES:
-            normalized_category = None
-        amount = parsed.get("amount")
-        normalized_amount = None
-        if amount is not None:
-            amount_text = str(amount).replace(",", "").strip()
-            if amount_text:
-                normalized_amount = float(amount_text)
-        return {
-            "is_transaction": bool(parsed.get("is_transaction", False)),
-            "merchant_name": (str(parsed.get("merchant_name", "")).strip() or None),
-            "amount": normalized_amount,
-            "transaction_datetime": _parse_datetime_from_string(parsed.get("transaction_datetime")),
-            "upi_id": (str(parsed.get("upi_id", "")).strip().lower() or None),
-            "reference_id": (str(parsed.get("reference_id", "")).strip().upper() or None),
-            "bank_name": (str(parsed.get("bank_name", "")).strip() or None),
-            "category": normalized_category,
-            "transaction_type": normalized_type,
-        }
-    except Exception as error:
-        logging.warning("SMS field extraction via AI failed: %s", error)
-        return {}
-
-def normalize_transaction_type(value: str) -> str:
-    normalized = (value or "").strip().lower()
-    if normalized in {"self transfer", "self_transfer", "self-transfer"}:
-        return "self_transfer"
-    if normalized not in {"credit", "debit", "self_transfer"}:
-        raise HTTPException(status_code=400, detail="transaction_type must be 'credit', 'debit', or 'self_transfer'")
-    return normalized
-
-def infer_transaction_type(text: str) -> str:
-    lowered = (text or "").lower()
-
-    self_transfer_keywords = [
-        "self transfer",
-        "to own",
-        "own account",
-        "fund transfer to self",
-        "a/c transfer",
-        "account transfer",
-    ]
-    if any(keyword in lowered for keyword in self_transfer_keywords):
-        return "self_transfer"
-
-    credit_keywords = [
-        "credited",
-        "credit alert",
-        "received",
-        "salary",
-        "refund",
-        "cashback",
-        "cash back",
-        "deposited",
-        "deposit",
-        "interest credited",
-        "reversal",
-    ]
-    debit_keywords = [
-        "debited",
-        "spent",
-        "purchase",
-        "withdrawn",
-        "paid",
-        "bill",
-        "emi",
-        "sent",
-        "transfer to",
-    ]
-
-    if any(keyword in lowered for keyword in credit_keywords):
-        return "credit"
-    if any(keyword in lowered for keyword in debit_keywords):
-        return "debit"
-    return "debit"
-
-
-def _normalize_merchant_label(value: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9@._ -]", " ", value or "")
-    cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
-    return cleaned[:80]
-
-
-def _cleanup_merchant_candidate(raw_value: str) -> str:
-    cleaned = re.sub(r"\s+", " ", re.sub(r"[^a-zA-Z0-9&@._ -]", " ", raw_value or "")).strip()
-    if not cleaned:
-        return ""
-
-    cleaned = re.split(
-        r"\b(?:ref|utr|txn|txnid|available|avl|balance|bal|a/c|account|ending|card|on)\b",
-        cleaned,
-        flags=re.IGNORECASE,
-    )[0].strip(" -:,.")
-    lowered = cleaned.lower()
-    if not lowered:
-        return ""
-    if any(bank_word in lowered for bank_word in BANK_KEYWORDS):
-        return ""
-    if lowered in {"upi", "imps", "neft", "rtgs", "merchant"}:
-        return ""
-    if re.fullmatch(r"\d+", lowered):
-        return ""
-    return cleaned[:60]
-
-
-def _extract_ref_id(text: str) -> Optional[str]:
-    sms = text or ""
-    patterns = [
-        r"(?:utr|rrn|ref(?:erence)?(?:\s*no)?|txn(?:\s*id)?|transaction\s*id)\s*[:\-]?\s*([A-Za-z0-9]{6,30})",
-        r"\b([A-Z0-9]{10,24})\b",
-    ]
-
-    candidates: List[str] = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, sms, flags=re.IGNORECASE):
-            value = (match.group(1) or "").strip().upper()
-            if len(value) >= 6:
-                candidates.append(value)
-        if candidates:
-            break
-
-    if not candidates:
-        return None
-
-    return sorted(candidates, key=len, reverse=True)[0]
-
-
-def _extract_upi_id(text: str) -> Optional[str]:
-    sms = text or ""
-    match = re.search(r"\b([a-zA-Z0-9.\-_]{2,})@([a-zA-Z]{2,})\b", sms)
-    if not match:
-        return None
-    return f"{match.group(1).lower()}@{match.group(2).lower()}"
-
-
-def _extract_bank_name(text: str) -> Optional[str]:
-    sms = (text or "").lower()
-    if not sms:
-        return None
-
-    bank_signatures: List[Tuple[str, str]] = [
-        ("state bank", "State Bank of India"),
-        ("sbi", "State Bank of India"),
-        ("hdfc", "HDFC Bank"),
-        ("icici", "ICICI Bank"),
-        ("axis", "Axis Bank"),
-        ("kotak", "Kotak Mahindra Bank"),
-        ("pnb", "Punjab National Bank"),
-        ("yes bank", "Yes Bank"),
-        ("idfc", "IDFC First Bank"),
-        ("indusind", "IndusInd Bank"),
-        ("canara", "Canara Bank"),
-        ("union bank", "Union Bank of India"),
-        ("bank of baroda", "Bank of Baroda"),
-        ("federal bank", "Federal Bank"),
-        ("paytm payments bank", "Paytm Payments Bank"),
-    ]
-    for needle, bank_name in bank_signatures:
-        if needle in sms:
-            return bank_name
-    return None
-
-
-def _extract_account_mask(text: str) -> Optional[str]:
-    sms = text or ""
-    patterns = [
-        r"(?:a\/c|ac|account)\s*(?:no\.?|number)?\s*[:\-]?\s*(?:xx+|\*+)?\s*([0-9]{3,6})",
-        r"(?:ending|ends with)\s*([0-9]{3,6})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, sms, flags=re.IGNORECASE)
-        if match:
-            last_digits = (match.group(1) or "").strip()
-            if len(last_digits) >= 3:
-                return f"xx{last_digits[-4:]}" if len(last_digits) >= 4 else f"xx{last_digits}"
-    return None
-
-
-def _extract_merchant_name(text: str) -> Optional[str]:
-    sms = text or ""
-    upi_id = _extract_upi_id(sms)
-    if upi_id:
-        left = upi_id.split("@", 1)[0]
-        upi_name = _cleanup_merchant_candidate(left.replace(".", " ").replace("_", " ").replace("-", " "))
-        if upi_name:
-            return upi_name
-
-    patterns = [
-        r"(?:paid to|payment to|sent to|to|at|for|towards)\s+([A-Za-z0-9&._ -]{3,64})",
-        r"(?:merchant|payee)\s*[:\-]?\s*([A-Za-z0-9&._ -]{3,64})",
-        r"(?:credited from|received from)\s+([A-Za-z0-9&._ -]{3,64})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, sms, flags=re.IGNORECASE)
-        if match:
-            merchant = _cleanup_merchant_candidate(match.group(1))
-            if merchant:
-                return merchant
-
-    return None
-
-
-def _extract_merchant_key(text: str) -> Optional[str]:
-    sms = text or ""
-    upi_id = _extract_upi_id(sms)
-    if upi_id:
-        return f"upi:{upi_id}"
-
-    merchant_name = _extract_merchant_name(sms)
-    if merchant_name:
-        return f"merchant:{_normalize_merchant_label(merchant_name)}"
-
-    return None
-
-
-def _build_similar_match_query(
-    user_id: str,
-    base_transaction_id: str,
-    merchant_key: Optional[str],
-    upi_id: Optional[str],
-) -> Dict[str, Any]:
-    query: Dict[str, Any] = {"user_id": user_id, "id": {"$ne": base_transaction_id}}
-
-    or_conditions: List[Dict[str, Any]] = []
-    if upi_id:
-        escaped_upi = re.escape(upi_id)
-        or_conditions.append({"upi_id": upi_id})
-        or_conditions.append({"description": {"$regex": escaped_upi, "$options": "i"}})
-
-    if merchant_key:
-        merchant_label = merchant_key.replace("merchant:", "", 1).strip()
-        or_conditions.append({"merchant_key": merchant_key})
-        if merchant_label:
-            escaped_label = re.escape(merchant_label)
-            or_conditions.append(
-                {"description": {"$regex": escaped_label, "$options": "i"}}
-            )
-
-    if or_conditions:
-        query["$or"] = or_conditions
-
-    return query
-
-
-async def _learned_category_for_transaction(
-    user_id: str,
-    merchant_key: Optional[str],
-    upi_id: Optional[str],
-) -> Optional[str]:
-    if not merchant_key and not upi_id:
-        return None
-
-    query: Dict[str, Any] = {"user_id": user_id}
-    or_conditions: List[Dict[str, Any]] = []
-    if upi_id:
-        or_conditions.append({"upi_id": upi_id})
-        or_conditions.append({"merchant_key": f"upi:{upi_id}"})
-    if merchant_key:
-        or_conditions.append({"merchant_key": merchant_key})
-    if not or_conditions:
-        return None
-    query["$or"] = or_conditions
-
-    rule = await db.transaction_category_rules.find_one(
-        query,
-        sort=[("updated_at", -1)],
-    )
-    if not rule:
-        return None
-    category = str(rule.get("category", "")).strip()
-    return category if category in ALLOWED_CATEGORIES else None
-
-
-async def _save_category_rule(
-    user_id: str,
-    category: str,
-    merchant_key: Optional[str],
-    upi_id: Optional[str],
-) -> None:
-    if category not in ALLOWED_CATEGORIES:
-        return
-    if not merchant_key and not upi_id:
-        return
-
-    selector: Dict[str, Any] = {"user_id": user_id}
-    if upi_id:
-        selector["upi_id"] = upi_id
-    elif merchant_key:
-        selector["merchant_key"] = merchant_key
-    else:
-        return
-
-    await db.transaction_category_rules.update_one(
-        selector,
-        {
-            "$set": {
-                "category": category,
-                "merchant_key": merchant_key,
-                "upi_id": upi_id,
-                "updated_at": datetime.utcnow(),
-            },
-            "$setOnInsert": {"created_at": datetime.utcnow()},
-        },
-        upsert=True,
-    )
-
-
-async def _init_bank_reference_data() -> None:
-    try:
-        await db.bank_reference.create_index("code", unique=True)
-        await db.bank_reference.create_index("name")
-    except Exception as error:
-        logging.warning("Unable to create bank_reference indexes: %s", error)
-
-    for bank in BANK_REFERENCE_DATA:
-        try:
-            await db.bank_reference.update_one(
-                {"code": bank["code"]},
-                {"$set": {"name": bank["name"], "updated_at": datetime.utcnow()}},
-                upsert=True,
-            )
-        except Exception as error:
-            logging.warning("Unable to upsert bank reference %s: %s", bank["code"], error)
-
-
-async def _init_transaction_learning_infra() -> None:
-    try:
-        await db.transaction_category_rules.create_index(
-            [("user_id", 1), ("merchant_key", 1)],
-            unique=True,
-            sparse=True,
-        )
-        await db.transaction_category_rules.create_index(
-            [("user_id", 1), ("upi_id", 1)],
-            unique=True,
-            sparse=True,
-        )
-        await db.transaction_category_rules.create_index([("updated_at", -1)])
-    except Exception as error:
-        logging.warning("Unable to initialize transaction learning indexes: %s", error)
 
 async def generate_insights(user_id: str) -> str:
     transactions = await db.transactions.find(
@@ -1671,388 +1118,6 @@ async def update_user_profile(user_id: str, request: UserProfileUpdate):
         raise HTTPException(status_code=500, detail="Failed to update profile")
     return User(**updated_user)
 
-@api_router.post("/transactions/manual", response_model=Transaction)
-async def create_manual_transaction(transaction: TransactionCreate):
-    merchant_key = _extract_merchant_key(transaction.description)
-    upi_id = _extract_upi_id(transaction.description)
-    learned_category = await _learned_category_for_transaction(
-        transaction.user_id,
-        merchant_key=merchant_key,
-        upi_id=upi_id,
-    )
-    ai_result = (
-        {"category": learned_category, "sentiment": "neutral"}
-        if learned_category
-        else await categorize_transaction_with_ai(
-            transaction.description,
-            transaction.amount,
-        )
-    )
-
-    trans_dict = transaction.dict()
-    trans_dict["date"] = trans_dict.get("date") or datetime.utcnow()
-    trans_dict["source"] = "manual"
-    trans_dict["category"] = ai_result["category"]
-    trans_dict["sentiment"] = ai_result["sentiment"]
-    trans_dict["transaction_type"] = (
-        normalize_transaction_type(transaction.transaction_type)
-        if transaction.transaction_type
-        else infer_transaction_type(transaction.description)
-    )
-    trans_dict["upi_id"] = upi_id
-    trans_dict["merchant_key"] = merchant_key
-    trans_dict["merchant_name"] = _extract_merchant_name(transaction.description)
-    trans_dict["bank_name"] = _extract_bank_name(transaction.description)
-    trans_dict["account_mask"] = _extract_account_mask(transaction.description)
-
-    trans_obj = Transaction(**trans_dict)
-    await db.transactions.insert_one(trans_obj.dict())
-    return trans_obj
-
-@api_router.post("/transactions/sms", response_model=Transaction)
-async def create_sms_transaction(request: SMSTransactionRequest):
-    ai_fields = await _extract_sms_fields_with_ai(request.sms_text)
-    is_transaction_by_ai = bool(ai_fields.get("is_transaction"))
-
-    if not is_transaction_by_ai and not _is_transaction_sms(request.sms_text):
-        raise HTTPException(status_code=422, detail="SMS is not a financial transaction alert")
-
-    amount_from_ai = ai_fields.get("amount")
-    amount: Optional[float] = None
-    if amount_from_ai is not None:
-        try:
-            amount = float(amount_from_ai)
-        except Exception:
-            amount = None
-
-    if amount is None:
-        amount_match = re.search(
-            r"(?:Rs\.?|INR|\$)\s*([0-9,]+\.?[0-9]*)",
-            request.sms_text,
-            re.IGNORECASE,
-        )
-        if not amount_match:
-            raise HTTPException(400, "Amount not found")
-        amount = float(amount_match.group(1).replace(",", ""))
-
-    transaction_date = request.date or ai_fields.get("transaction_datetime") or datetime.utcnow()
-    description = request.sms_text[:140]
-    ref_id = ai_fields.get("reference_id") or _extract_ref_id(request.sms_text)
-    upi_id = ai_fields.get("upi_id") or _extract_upi_id(request.sms_text)
-    merchant_name = ai_fields.get("merchant_name") or _extract_merchant_name(request.sms_text)
-    merchant_key = f"merchant:{_normalize_merchant_label(merchant_name)}" if merchant_name else _extract_merchant_key(request.sms_text)
-    bank_name = ai_fields.get("bank_name") or _extract_bank_name(request.sms_text)
-    account_mask = _extract_account_mask(request.sms_text)
-
-    learned_category = await _learned_category_for_transaction(
-        request.user_id,
-        merchant_key=merchant_key,
-        upi_id=upi_id,
-    )
-    category_from_ai = ai_fields.get("category")
-    transaction_type = ai_fields.get("transaction_type") or infer_transaction_type(request.sms_text)
-    ai_result = {"category": "Other", "sentiment": "neutral"}
-    if learned_category:
-        ai_result["category"] = learned_category
-    elif category_from_ai and category_from_ai in ALLOWED_CATEGORIES:
-        ai_result["category"] = category_from_ai
-    else:
-        ai_result = await categorize_transaction_with_ai(
-            request.sms_text,
-            amount,
-        )
-
-    if ref_id:
-        existing_by_ref = await db.transactions.find_one(
-            {
-                "user_id": request.user_id,
-                "source": "sms",
-                "ref_id": ref_id,
-            }
-        )
-        if existing_by_ref:
-            return Transaction(**existing_by_ref)
-
-    start_window = transaction_date - timedelta(minutes=3)
-    end_window = transaction_date + timedelta(minutes=3)
-    fallback_query: Dict[str, Any] = {
-        "user_id": request.user_id,
-        "source": "sms",
-        "amount": amount,
-        "date": {"$gte": start_window, "$lte": end_window},
-    }
-    if merchant_key:
-        fallback_query["$or"] = [
-            {"merchant_key": merchant_key},
-            {"description": description},
-        ]
-    else:
-        fallback_query["description"] = description
-
-    existing_sms_transaction = await db.transactions.find_one(fallback_query)
-    if existing_sms_transaction:
-        return Transaction(**existing_sms_transaction)
-
-    trans_obj = Transaction(
-        user_id=request.user_id,
-        amount=amount,
-        category=ai_result["category"],
-        description=description,
-        date=transaction_date,
-        source="sms",
-        transaction_type=transaction_type,
-        sentiment=ai_result["sentiment"],
-        ref_id=ref_id,
-        merchant_key=merchant_key,
-        merchant_name=merchant_name,
-        bank_name=bank_name,
-        account_mask=account_mask,
-        upi_id=upi_id,
-    )
-
-    await db.transactions.insert_one(trans_obj.dict())
-    return trans_obj
-
-
-@api_router.post(
-    "/transactions/{transaction_id}/similar-preview",
-    response_model=TransactionSimilarityResponse,
-)
-async def preview_similar_transactions(
-    transaction_id: str, request: TransactionSimilarityRequest
-):
-    selected_transaction = await db.transactions.find_one(
-        {"id": transaction_id, "user_id": request.user_id}
-    )
-    if not selected_transaction:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-
-    merchant_key = selected_transaction.get("merchant_key") or _extract_merchant_key(
-        selected_transaction.get("description", "")
-    )
-    upi_id = selected_transaction.get("upi_id") or _extract_upi_id(
-        selected_transaction.get("description", "")
-    )
-
-    if not merchant_key and not upi_id:
-        return TransactionSimilarityResponse(
-            match_count=0, merchant_key=None, upi_id=None, sample_descriptions=[]
-        )
-
-    query = _build_similar_match_query(
-        user_id=request.user_id,
-        base_transaction_id=transaction_id,
-        merchant_key=merchant_key,
-        upi_id=upi_id,
-    )
-
-    similar_transactions = await db.transactions.find(query).sort("date", -1).limit(5).to_list(5)
-    match_count = await db.transactions.count_documents(query)
-
-    return TransactionSimilarityResponse(
-        match_count=match_count,
-        merchant_key=merchant_key,
-        upi_id=upi_id,
-        sample_descriptions=[str(item.get("description", ""))[:80] for item in similar_transactions],
-    )
-
-@api_router.get("/transactions/{user_id}", response_model=List[Transaction])
-async def get_user_transactions(user_id: str, limit: int = 50):
-    raw_transactions = await db.transactions.find({"user_id": user_id}).to_list(2000)
-
-    normalized: List[Dict[str, Any]] = []
-    for item in raw_transactions:
-        doc = dict(item)
-        doc["date"] = doc.get("date") or doc.get("created_at") or datetime.utcnow()
-        description = str(doc.get("description", ""))
-        if not doc.get("merchant_name"):
-            doc["merchant_name"] = _extract_merchant_name(description)
-        if not doc.get("bank_name"):
-            doc["bank_name"] = _extract_bank_name(description)
-        if not doc.get("account_mask"):
-            doc["account_mask"] = _extract_account_mask(description)
-        normalized.append(doc)
-
-    normalized.sort(key=lambda tx: _transaction_datetime(tx), reverse=True)
-    return [Transaction(**t) for t in normalized[: max(1, limit)]]
-
-@api_router.put("/transactions/{transaction_id}/category", response_model=Transaction)
-async def update_transaction_category(transaction_id: str, request: TransactionCategoryUpdate):
-    normalized_category = _normalize_category_name(request.category)
-    if normalized_category not in ALLOWED_CATEGORIES:
-        raise HTTPException(status_code=400, detail="Invalid category")
-
-    update_result = await db.transactions.update_one(
-        {"id": transaction_id, "user_id": request.user_id},
-        {"$set": {"category": normalized_category}},
-    )
-
-    if update_result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-
-    updated_transaction = await db.transactions.find_one(
-        {"id": transaction_id, "user_id": request.user_id}
-    )
-
-    if request.apply_to_similar and updated_transaction:
-        merchant_key = updated_transaction.get("merchant_key") or _extract_merchant_key(
-            updated_transaction.get("description", "")
-        )
-        upi_id = updated_transaction.get("upi_id") or _extract_upi_id(
-            updated_transaction.get("description", "")
-        )
-
-        bulk_query = _build_similar_match_query(
-            user_id=request.user_id,
-            base_transaction_id=transaction_id,
-            merchant_key=merchant_key,
-            upi_id=upi_id,
-        )
-
-        if bulk_query.get("$or"):
-            await db.transactions.update_many(
-                bulk_query,
-                {"$set": {"category": normalized_category}},
-            )
-
-    if updated_transaction:
-        await _save_category_rule(
-            user_id=request.user_id,
-            category=normalized_category,
-            merchant_key=updated_transaction.get("merchant_key"),
-            upi_id=updated_transaction.get("upi_id"),
-        )
-
-    return Transaction(**updated_transaction)
-
-@api_router.put("/transactions/{transaction_id}/amount", response_model=Transaction)
-async def update_transaction_amount(transaction_id: str, request: TransactionAmountUpdate):
-    if request.amount <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
-
-    update_result = await db.transactions.update_one(
-        {"id": transaction_id, "user_id": request.user_id},
-        {"$set": {"amount": float(request.amount)}},
-    )
-
-    if update_result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-
-    updated_transaction = await db.transactions.find_one(
-        {"id": transaction_id, "user_id": request.user_id}
-    )
-    return Transaction(**updated_transaction)
-
-@api_router.put("/transactions/{transaction_id}", response_model=Transaction)
-async def update_transaction(transaction_id: str, request: TransactionUpdateRequest):
-    update_fields: Dict[str, object] = {}
-
-    if request.amount is not None:
-        if request.amount <= 0:
-            raise HTTPException(status_code=400, detail="Amount must be greater than 0")
-        update_fields["amount"] = float(request.amount)
-
-    if request.category is not None:
-        normalized_category = _normalize_category_name(request.category)
-        if normalized_category not in ALLOWED_CATEGORIES:
-            raise HTTPException(status_code=400, detail="Invalid category")
-        update_fields["category"] = normalized_category
-
-    if request.transaction_type is not None:
-        update_fields["transaction_type"] = normalize_transaction_type(
-            request.transaction_type
-        )
-
-    if request.description is not None:
-        cleaned_description = request.description.strip()
-        if not cleaned_description:
-            raise HTTPException(status_code=400, detail="Description cannot be empty")
-        update_fields["description"] = cleaned_description
-        update_fields["upi_id"] = _extract_upi_id(cleaned_description)
-        update_fields["merchant_key"] = _extract_merchant_key(cleaned_description)
-        update_fields["merchant_name"] = _extract_merchant_name(cleaned_description)
-        update_fields["bank_name"] = _extract_bank_name(cleaned_description)
-        update_fields["account_mask"] = _extract_account_mask(cleaned_description)
-
-    if request.date is not None:
-        update_fields["date"] = request.date
-
-    if not update_fields:
-        raise HTTPException(status_code=400, detail="No fields provided to update")
-
-    update_result = await db.transactions.update_one(
-        {"id": transaction_id, "user_id": request.user_id},
-        {"$set": update_fields},
-    )
-
-    if update_result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Transaction not found")
-
-    updated_transaction = await db.transactions.find_one(
-        {"id": transaction_id, "user_id": request.user_id}
-    )
-    if request.category is not None and updated_transaction:
-        await _save_category_rule(
-            user_id=request.user_id,
-            category=str(updated_transaction.get("category", "Other")),
-            merchant_key=updated_transaction.get("merchant_key"),
-            upi_id=updated_transaction.get("upi_id"),
-        )
-    return Transaction(**updated_transaction)
-
-@api_router.get("/transactions/{user_id}/analytics")
-async def get_transaction_analytics(user_id: str, days: int = 30):
-    start_date = datetime.utcnow() - timedelta(days=days)
-    raw_transactions = await db.transactions.find({"user_id": user_id}).to_list(3000)
-    transactions = [
-        t for t in raw_transactions if _transaction_datetime(t) >= start_date
-    ]
-
-    total_debit = sum(
-        t.get("amount", 0)
-        for t in transactions
-        if t.get("transaction_type", "debit") == "debit"
-    )
-    total_credit = sum(
-        t.get("amount", 0)
-        for t in transactions
-        if t.get("transaction_type", "debit") == "credit"
-    )
-    total_spending = total_debit
-
-    categories: Dict[str, float] = {}
-    for t in transactions:
-        if t.get("transaction_type", "debit") != "debit":
-            continue
-        cat = t.get("category", "Other")
-        categories[cat] = categories.get(cat, 0) + t.get("amount", 0)
-
-    daily_spending: Dict[str, float] = {}
-    for t in transactions:
-        if t.get("transaction_type", "debit") != "debit":
-            continue
-        date_key = _transaction_datetime(t).strftime("%Y-%m-%d")
-        daily_spending[date_key] = daily_spending.get(date_key, 0) + t.get("amount", 0)
-
-    sentiment_counts = {"positive": 0, "neutral": 0, "negative": 0}
-    for t in transactions:
-        sent = t.get("sentiment", "neutral")
-        sentiment_counts[sent] = sentiment_counts.get(sent, 0) + 1
-
-    return {
-        "total_spending": total_spending,
-        "total_debit": total_debit,
-        "total_credit": total_credit,
-        "transaction_count": len(transactions),
-        "average_transaction": (
-            total_debit / max(1, len([t for t in transactions if t.get("transaction_type", "debit") == "debit"]))
-        ),
-        "categories": categories,
-        "daily_spending": daily_spending,
-        "sentiment": sentiment_counts,
-    }
-
-# Credit endpoints
 @api_router.post("/credits", response_model=Credit)
 async def create_credit(credit: CreditCreate):
     credit_dict = credit.dict()
@@ -2737,18 +1802,22 @@ async def get_chat_history(user_id: str, limit: int = 50):
 # ==================== APP SETUP ====================
 
 app.include_router(api_router)
+app.include_router(create_transactions_router(lambda: db), prefix="/api")
 app.include_router(create_goal_router(lambda: db), prefix="/api")
 app.include_router(create_assistant_router(lambda: db), prefix="/api")
 
+cors_origins = _parse_cors_origins()
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
+    allow_credentials=False,
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(SecurityHeadersMiddleware)
 
 logging.basicConfig(level=logging.INFO)
+logging.info("Configured CORS allowlist with %s origin(s)", len(cors_origins))
 
 @app.on_event("startup")
 async def startup_tasks():
