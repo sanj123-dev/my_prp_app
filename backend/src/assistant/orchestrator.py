@@ -1057,7 +1057,11 @@ class FinalResponseAgent(BaseAgent):
     def _normalize_money_phrasing(self, text: str) -> str:
         normalized = re.sub(r"\bINR\b", "\u20B9", text or "", flags=re.IGNORECASE)
         normalized = re.sub(r"\bRs\.?\s*", "\u20B9", normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)", r"\u20B9\1", normalized)
+        normalized = re.sub(
+            r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+            lambda match: f"\u20B9{match.group(1)}",
+            normalized,
+        )
 
         def add_symbol(match: re.Match[str]) -> str:
             label = str(match.group(1) or "")
