@@ -303,36 +303,64 @@ def create_transactions_router(db_provider) -> APIRouter:
 
     @router.put("/transactions/{transaction_id}/category", response_model=Transaction)
     async def update_transaction_category(transaction_id: str, request: TransactionCategoryUpdate):
-        normalized_category = _normalize_category_name(request.category)
-        if normalized_category not in ALLOWED_CATEGORIES:
-            raise HTTPException(status_code=400, detail="Invalid category")
+        try:
+            normalized_category = _normalize_category_name(request.category)
+            if normalized_category not in ALLOWED_CATEGORIES:
+                raise HTTPException(status_code=400, detail="Invalid category")
 
-        update_result = await db.transactions.update_one(
-            {"id": transaction_id, "user_id": request.user_id},
-            {"$set": {"category": normalized_category}},
-        )
-        if update_result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Transaction not found")
-
-        updated_transaction = await db.transactions.find_one({"id": transaction_id, "user_id": request.user_id})
-        if request.apply_to_similar and updated_transaction:
-            merchant_key = updated_transaction.get("merchant_key") or _extract_merchant_key(updated_transaction.get("description", ""))
-            upi_id = updated_transaction.get("upi_id") or _extract_upi_id(updated_transaction.get("description", ""))
-            bulk_query = _build_similar_match_query(user_id=request.user_id, base_transaction_id=transaction_id, merchant_key=merchant_key, upi_id=upi_id)
-            if bulk_query.get("$or"):
-                await db.transactions.update_many(bulk_query, {"$set": {"category": normalized_category}})
-
-        if updated_transaction:
-            derived_merchant_key = updated_transaction.get("merchant_key") or _extract_merchant_key(updated_transaction.get("description", ""))
-            derived_upi_id = updated_transaction.get("upi_id") or _extract_upi_id(updated_transaction.get("description", ""))
-            await _save_category_rule(
-                user_id=request.user_id,
-                category=normalized_category,
-                merchant_key=derived_merchant_key,
-                upi_id=derived_upi_id,
-                strength_increment=3 if request.apply_to_similar else 1,
+            update_result = await db.transactions.update_one(
+                {"id": transaction_id, "user_id": request.user_id},
+                {"$set": {"category": normalized_category}},
             )
-        return Transaction(**updated_transaction)
+            if update_result.matched_count == 0:
+                raise HTTPException(status_code=404, detail="Transaction not found")
+
+            updated_transaction = await db.transactions.find_one({"id": transaction_id, "user_id": request.user_id})
+            if not updated_transaction:
+                raise HTTPException(status_code=404, detail="Transaction not found after update")
+
+            if request.apply_to_similar:
+                merchant_key = updated_transaction.get("merchant_key") or _extract_merchant_key(updated_transaction.get("description", ""))
+                upi_id = updated_transaction.get("upi_id") or _extract_upi_id(updated_transaction.get("description", ""))
+                bulk_query = _build_similar_match_query(
+                    user_id=request.user_id,
+                    base_transaction_id=transaction_id,
+                    merchant_key=merchant_key,
+                    upi_id=upi_id,
+                )
+                if bulk_query.get("$or"):
+                    await db.transactions.update_many(bulk_query, {"$set": {"category": normalized_category}})
+
+            # Rule learning should not break category update response.
+            try:
+                derived_merchant_key = updated_transaction.get("merchant_key") or _extract_merchant_key(updated_transaction.get("description", ""))
+                derived_upi_id = updated_transaction.get("upi_id") or _extract_upi_id(updated_transaction.get("description", ""))
+                await _save_category_rule(
+                    user_id=request.user_id,
+                    category=normalized_category,
+                    merchant_key=derived_merchant_key,
+                    upi_id=derived_upi_id,
+                    strength_increment=3 if request.apply_to_similar else 1,
+                )
+            except Exception as rule_error:
+                logging.warning(
+                    "Category rule save failed for user=%s tx=%s: %s",
+                    request.user_id,
+                    transaction_id,
+                    rule_error,
+                )
+
+            return Transaction(**updated_transaction)
+        except HTTPException:
+            raise
+        except Exception as error:
+            logging.exception(
+                "Category update failed for user=%s tx=%s: %s",
+                request.user_id,
+                transaction_id,
+                error,
+            )
+            raise HTTPException(status_code=500, detail="Failed to update transaction category")
 
     @router.put("/transactions/{transaction_id}/amount", response_model=Transaction)
     async def update_transaction_amount(transaction_id: str, request: TransactionAmountUpdate):

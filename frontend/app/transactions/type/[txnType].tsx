@@ -25,6 +25,7 @@ import {
   subMonths,
 } from 'date-fns';
 import { formatINR } from '../../../lib/currency';
+import { getAxiosErrorDetails } from '../../../lib/httpError';
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -188,23 +189,55 @@ export default function TransactionTypeDetailScreen() {
         return;
       }
 
-      const response = await axios.put(
-        `${EXPO_PUBLIC_BACKEND_URL}/api/transactions/${editingTransaction.id}`,
-        {
-          user_id: userId,
-          amount: parsedAmount,
-          category: editCategory,
-          transaction_type: editType,
+      try {
+        const response = await axios.put(
+          `${EXPO_PUBLIC_BACKEND_URL}/api/transactions/${editingTransaction.id}`,
+          {
+            user_id: userId,
+            amount: parsedAmount,
+            category: editCategory,
+            transaction_type: editType,
+          }
+        );
+        const updated = response.data as Transaction;
+        setTransactions((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      } catch (primaryError) {
+        // Compatibility fallback for deployments that only expose legacy edit endpoints.
+        const details = getAxiosErrorDetails(primaryError);
+        const status = details.status || 0;
+        const shouldFallback = [400, 404, 405, 422, 500].includes(status);
+        if (!shouldFallback) {
+          throw primaryError;
         }
-      );
 
-      const updated = response.data as Transaction;
-      setTransactions((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+        await axios.put(
+          `${EXPO_PUBLIC_BACKEND_URL}/api/transactions/${editingTransaction.id}/amount`,
+          {
+            user_id: userId,
+            amount: parsedAmount,
+          }
+        );
+        await axios.put(
+          `${EXPO_PUBLIC_BACKEND_URL}/api/transactions/${editingTransaction.id}/category`,
+          {
+            user_id: userId,
+            category: editCategory,
+            apply_to_similar: false,
+          }
+        );
+        await loadTransactions();
+      }
+
       setShowEditModal(false);
       setEditingTransaction(null);
     } catch (error) {
-      console.error('Error updating transaction:', error);
-      Alert.alert('Update failed', 'Could not update transaction.');
+      const details = getAxiosErrorDetails(error);
+      console.error('Error updating transaction:', details);
+      const detailText =
+        details.status != null
+          ? `Could not update transaction (${details.status}).`
+          : 'Could not update transaction.';
+      Alert.alert('Update failed', detailText);
     } finally {
       setSavingEdit(false);
     }
