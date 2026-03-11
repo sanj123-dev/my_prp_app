@@ -35,6 +35,14 @@ type MessagePayload = {
 const tryParseAxiosStatus = (error: unknown) =>
   axios.isAxiosError(error) ? (error as AxiosError).response?.status ?? null : null;
 
+const shouldFallbackToLegacy = (error: unknown) => {
+  const status = tryParseAxiosStatus(error);
+  if (!status) return true;
+  if ([404, 405, 422].includes(status)) return true;
+  if (status >= 500) return true;
+  return false;
+};
+
 const sanitizeHistoryMessage = (raw: any): AssistantHistoryMessage | null => {
   const roleRaw = String(raw?.role || '').toLowerCase();
   const role = roleRaw === 'assistant' || roleRaw === 'system' ? roleRaw : 'user';
@@ -70,8 +78,7 @@ export class AssistantClient {
         carryoverInsights: String(response.data?.carryover_insights || ''),
       };
     } catch (error) {
-      const status = tryParseAxiosStatus(error);
-      if (status && ![404, 405, 422].includes(status)) {
+      if (!shouldFallbackToLegacy(error)) {
         throw error;
       }
       const fallback = await axios.post(`${this.baseUrl}/api/chat/session/start`, body);
@@ -98,8 +105,7 @@ export class AssistantClient {
         response: String(response.data?.response || ''),
       };
     } catch (error) {
-      const status = tryParseAxiosStatus(error);
-      if (status && ![404, 405, 422].includes(status)) {
+      if (!shouldFallbackToLegacy(error)) {
         throw error;
       }
       const fallback = await axios.post(`${this.baseUrl}/api/chat`, body);
@@ -118,8 +124,7 @@ export class AssistantClient {
       const rows = Array.isArray(response.data) ? response.data : [];
       return rows.map(sanitizeHistoryMessage).filter(Boolean) as AssistantHistoryMessage[];
     } catch (error) {
-      const status = tryParseAxiosStatus(error);
-      if (status && ![404, 405, 422].includes(status)) {
+      if (!shouldFallbackToLegacy(error)) {
         throw error;
       }
       const fallback = await axios.get(`${this.baseUrl}/api/chat/${userId}`, {

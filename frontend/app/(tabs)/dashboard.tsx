@@ -63,14 +63,6 @@ type CategorySpendCard = {
   percent: number;
 };
 
-type BankCardSummary = {
-  bankName: string;
-  last4: string;
-  totalDebit: number;
-  totalCredit: number;
-  txCount: number;
-};
-
 const CATEGORY_GRADIENTS = [
   ['#1f4b99', '#17356d'],
   ['#8a2f6e', '#5a1d46'],
@@ -80,18 +72,11 @@ const CATEGORY_GRADIENTS = [
   ['#2d6b7e', '#204c59'],
 ] as const;
 
-const BANK_GRADIENTS = [
-  ['#22305a', '#1a2442'],
-  ['#2c3f67', '#1c2946'],
-  ['#273a6f', '#1a2a4f'],
-  ['#32416c', '#222e53'],
-] as const;
-
 const FALLBACK_FINANCIAL_NEWS: FinancialNewsItem[] = [
   {
     title: 'Markets hold steady as investors assess inflation and rate signals',
     summary:
-      'Global equity benchmarks moved in a narrow range as investors reviewed fresh inflation commentary and central bank guidance. Analysts said risk appetite remained constructive, though short term volatility may persist. Portfolio strategy notes continued to favor diversified exposure, quality earnings, and disciplined cash flow management in uncertain macro conditions.',
+      'Global equity benchmarks moved in a narrow range as investors reviewed inflation commentary and central bank guidance.',
     source: 'SpendWise Feed',
     link: 'https://www.reuters.com/markets/',
     sentiment: 'positive',
@@ -99,7 +84,7 @@ const FALLBACK_FINANCIAL_NEWS: FinancialNewsItem[] = [
   {
     title: 'Tech and financial sectors lead selective gains in late session trading',
     summary:
-      'Large cap technology and financial stocks outperformed in late trading, supported by resilient earnings expectations and improving liquidity cues. Market observers highlighted selective rotation rather than broad risk on momentum. For retail investors, advisors recommended staying focused on asset allocation targets and avoiding concentrated bets during headline driven swings.',
+      'Large cap technology and financial stocks outperformed in late trading with selective sector rotation.',
     source: 'SpendWise Feed',
     link: 'https://finance.yahoo.com/',
     sentiment: 'neutral',
@@ -358,38 +343,12 @@ export default function Dashboard() {
       .slice(0, 10);
   }, [currentMonthTransactions]);
 
-  const bankCards = useMemo<BankCardSummary[]>(() => {
-    const extractLast4 = (mask?: string) => {
-      const digits = String(mask || '').replace(/\D/g, '');
-      return digits.length > 0 ? digits.slice(-4) : '0000';
-    };
-
-    const bucket = new Map<string, BankCardSummary>();
-    for (const tx of currentMonthTransactions) {
-      const bankName = String(tx.bank_name || 'Bank').trim() || 'Bank';
-      const last4 = extractLast4(tx.account_mask);
-      const key = `${bankName.toLowerCase()}|${last4}`;
-      const current = bucket.get(key) || {
-        bankName,
-        last4,
-        totalDebit: 0,
-        totalCredit: 0,
-        txCount: 0,
-      };
-      const amount = Number(tx.amount || 0);
-      if (tx.transaction_type === 'credit') {
-        current.totalCredit += amount;
-      } else {
-        current.totalDebit += amount;
-      }
-      current.txCount += 1;
-      bucket.set(key, current);
-    }
-
-    return Array.from(bucket.values())
-      .sort((a, b) => b.totalDebit + b.totalCredit - (a.totalDebit + a.totalCredit))
-      .slice(0, 8);
-  }, [currentMonthTransactions]);
+  const greetingText = useMemo(() => {
+    const hour = new Date().getHours();
+    if (hour < 12) return 'Good morning';
+    if (hour < 18) return 'Good afternoon';
+    return 'Good evening';
+  }, []);
 
   const getCategoryIcon = (category: string) => {
     const key = String(category || '').toLowerCase();
@@ -457,6 +416,8 @@ export default function Dashboard() {
 
   return (
     <SafeAreaView style={styles.container}>
+      <View style={styles.bgOrbTop} />
+      <View style={styles.bgOrbBottom} />
       <ScrollView
         style={styles.scrollView}
         refreshControl={
@@ -469,12 +430,19 @@ export default function Dashboard() {
       >
         <View style={styles.header}>
           <View>
-            <Text style={styles.welcomeText}>Dashboard</Text>
-            <Text style={styles.headerSubtext}>{format(new Date(), 'MMMM d, yyyy')}</Text>
+            <Text style={styles.greetingText}>{greetingText}</Text>
+            <Text style={styles.heroHeading}>Money Pulse</Text>
+            <Text style={styles.headerSubtext}>{format(new Date(), 'EEEE, MMMM d')}</Text>
           </View>
-          <TouchableOpacity style={styles.iconButton}>
-            <Ionicons name="notifications-outline" size={24} color="#fff" />
-          </TouchableOpacity>
+          <View style={styles.headerActions}>
+            <View style={styles.liveBadge}>
+              <View style={styles.liveDot} />
+              <Text style={styles.liveBadgeText}>Live Sync</Text>
+            </View>
+            <TouchableOpacity style={styles.iconButton}>
+              <Ionicons name="notifications-outline" size={20} color="#fff" />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {showSetupProgress && (
@@ -529,6 +497,7 @@ export default function Dashboard() {
               <Text style={styles.smallStatLabel}>Avg Debit</Text>
             </View>
           </View>
+
         </View>
 
         {categorySpendCards.length > 0 && (
@@ -565,50 +534,6 @@ export default function Dashboard() {
             </ScrollView>
           </View>
         )}
-
-        <View style={styles.section}>
-          <View style={styles.sectionHeaderRow}>
-            <Text style={styles.sectionTitle}>Bank Cards</Text>
-            <Text style={styles.bankSubLabel}>Credit and debit totals</Text>
-          </View>
-          {bankCards.length === 0 ? (
-            <View style={styles.emptyCard}>
-              <Text style={styles.emptyCardText}>No bank-linked transactions found for this month.</Text>
-            </View>
-          ) : (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bankCardsRow}>
-              {bankCards.map((card, index) => (
-                <LinearGradient
-                  key={`${card.bankName}-${card.last4}-${index}`}
-                  colors={BANK_GRADIENTS[index % BANK_GRADIENTS.length]}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.bankCard}
-                >
-                  <View style={styles.bankCardTop}>
-                    <View>
-                      <Text style={styles.bankNameText} numberOfLines={1}>{card.bankName}</Text>
-                      <Text style={styles.bankMaskText}>A/C ••••{card.last4}</Text>
-                    </View>
-                    <View style={styles.bankTxPill}>
-                      <Text style={styles.bankTxPillText}>{card.txCount} txns</Text>
-                    </View>
-                  </View>
-                  <View style={styles.bankTotalsRow}>
-                    <View>
-                      <Text style={styles.bankLabel}>Debit</Text>
-                      <Text style={styles.bankDebitValue}>{formatINR(card.totalDebit)}</Text>
-                    </View>
-                    <View>
-                      <Text style={styles.bankLabel}>Credit</Text>
-                      <Text style={styles.bankCreditValue}>{formatINR(card.totalCredit)}</Text>
-                    </View>
-                  </View>
-                </LinearGradient>
-              ))}
-            </ScrollView>
-          )}
-        </View>
 
         {insights && (
           <View style={styles.section}>
@@ -746,34 +671,91 @@ export default function Dashboard() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0f0f1e',
+    backgroundColor: '#070f21',
   },
   scrollView: {
     flex: 1,
   },
+  bgOrbTop: {
+    position: 'absolute',
+    top: -120,
+    right: -90,
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: 'rgba(54, 117, 255, 0.25)',
+  },
+  bgOrbBottom: {
+    position: 'absolute',
+    bottom: 180,
+    left: -120,
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    backgroundColor: 'rgba(38, 203, 165, 0.17)',
+  },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     paddingHorizontal: 24,
     paddingTop: Platform.OS === 'android' ? 16 : 0,
     paddingBottom: 16,
   },
-  welcomeText: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 4,
+  greetingText: {
+    fontSize: 13,
+    color: '#9db4e5',
+    marginBottom: 2,
+    fontWeight: '600',
+  },
+  heroHeading: {
+    fontSize: 31,
+    fontWeight: '800',
+    color: '#f5f8ff',
+    marginBottom: 2,
   },
   headerSubtext: {
     fontSize: 14,
-    color: '#999',
+    color: '#7f95c0',
+  },
+  headerActions: {
+    alignItems: 'flex-end',
+    gap: 10,
+  },
+  liveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#1f6f54',
+    backgroundColor: 'rgba(22, 94, 70, 0.35)',
+  },
+  liveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#32e2ac',
+  },
+  liveBadgeText: {
+    color: '#bff5df',
+    fontSize: 11,
+    fontWeight: '700',
   },
   iconButton: {
-    padding: 8,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#2e4571',
+    backgroundColor: 'rgba(19, 33, 60, 0.8)',
   },
   setupCard: {
-    backgroundColor: '#1a1a2e',
+    backgroundColor: 'rgba(16, 28, 51, 0.92)',
     borderRadius: 16,
     marginHorizontal: 24,
     marginBottom: 24,
@@ -822,7 +804,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   primaryCard: {
-    borderColor: '#3d6fbe',
+    borderColor: '#4e87dd',
   },
   heroTopRow: {
     flexDirection: 'row',
@@ -898,8 +880,8 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: '#fff',
+    fontWeight: '800',
+    color: '#f0f5ff',
     marginBottom: 16,
   },
   sectionHeaderRow: {
@@ -972,67 +954,6 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: '#f9fdff',
     borderRadius: 999,
-  },
-  bankCardsRow: {
-    gap: 12,
-    paddingRight: 24,
-  },
-  bankCard: {
-    width: 238,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#3d4f7e',
-    padding: 14,
-    gap: 14,
-  },
-  bankCardTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
-  bankNameText: {
-    color: '#ffffff',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  bankMaskText: {
-    color: '#bfcdef',
-    fontSize: 12,
-    marginTop: 4,
-    fontWeight: '600',
-  },
-  bankTxPill: {
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 999,
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-  },
-  bankTxPillText: {
-    color: '#e6eeff',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  bankTotalsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-end',
-  },
-  bankLabel: {
-    color: '#9eb2e1',
-    fontSize: 12,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  bankDebitValue: {
-    color: '#ffd0d0',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  bankCreditValue: {
-    color: '#c4f1ff',
-    fontSize: 15,
-    fontWeight: '800',
   },
   insightsHeader: {
     flexDirection: 'row',

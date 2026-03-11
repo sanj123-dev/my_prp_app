@@ -754,8 +754,18 @@ export default function Chat() {
     const hasChart = q.includes('chart') || q.includes('graph') || q.includes('visualize');
     const hasCategory = q.includes('category') || q.includes('categorywise') || q.includes('category-wise');
     const hasSpend = q.includes('spend') || q.includes('expense');
+    const analysisIntent =
+      q.includes('analyze') ||
+      q.includes('analysis') ||
+      q.includes('understand') ||
+      q.includes('breakdown') ||
+      q.includes('where am i spending') ||
+      q.includes('how can i save') ||
+      q.includes('saving tips');
     if (hasChart && hasCategory) return 'bar';
     if (hasChart && hasSpend) return 'line';
+    if (analysisIntent && hasCategory) return 'bar';
+    if (analysisIntent && hasSpend) return 'line';
     return null;
   };
 
@@ -801,7 +811,41 @@ export default function Chat() {
     }
 
     const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1]);
-    return { sorted, filteredRows, range };
+    const byDay: Record<string, number> = {};
+    for (const row of filteredRows) {
+      byDay[row.date] = (byDay[row.date] || 0) + row.amount;
+    }
+    return { sorted, filteredRows, byDay, range };
+  };
+
+  const buildVisualHighlightsText = (
+    payload: NonNullable<Awaited<ReturnType<typeof loadDebitRows>>>,
+    range: 'this_week' | 'this_month'
+  ) => {
+    const { sorted, byDay } = payload;
+    const rangeLabel = range === 'this_week' ? 'week' : 'month';
+    const total = sorted.reduce((sum, [, amt]) => sum + amt, 0);
+    const top = sorted[0];
+    const avgPerCategory = sorted.length > 0 ? total / sorted.length : 0;
+    const peakDay = Object.entries(byDay).sort(([, a], [, b]) => b - a)[0];
+
+    if (!top) {
+      return `I could not find debit spending data for this ${rangeLabel}.`;
+    }
+
+    const topShare = total > 0 ? (top[1] / total) * 100 : 0;
+    const savingTarget = Math.max(0, top[1] * 0.1);
+
+    return [
+      `Visual highlights (${rangeLabel}):`,
+      `- Total debit: \u20B9${total.toFixed(0)}`,
+      `- Top category: ${top[0]} (\u20B9${top[1].toFixed(0)}, ${topShare.toFixed(0)}% share)`,
+      peakDay ? `- Highest spend day: ${peakDay[0]} (\u20B9${Number(peakDay[1]).toFixed(0)})` : null,
+      `- Avg spend per active category: \u20B9${avgPerCategory.toFixed(0)}`,
+      `- Quick saving move: reduce ${top[0]} by 10% to save about \u20B9${savingTarget.toFixed(0)}.`,
+    ]
+      .filter(Boolean)
+      .join('\n');
   };
 
   const buildVisualization = async (
@@ -810,7 +854,7 @@ export default function Chat() {
   ) => {
     const payload = await loadDebitRows(range);
     if (!payload) return null;
-    const { sorted, filteredRows } = payload;
+    const { sorted, filteredRows, byDay } = payload;
     if (!sorted.length) return null;
     const rangeLabel = range === 'this_week' ? 'This Week' : 'This Month';
 
@@ -833,10 +877,6 @@ export default function Chat() {
     }
 
     if (mode === 'line') {
-      const byDay: Record<string, number> = {};
-      for (const row of filteredRows) {
-        byDay[row.date] = (byDay[row.date] || 0) + row.amount;
-      }
       const trend = Object.entries(byDay)
         .slice(-10)
         .map(([label, value]) => ({ label, value: Number(value.toFixed(2)) }));
@@ -894,22 +934,40 @@ export default function Chat() {
 
     try {
       const vizMode = classifyVisualizationRequest(userMessage);
+      const analysisIntent =
+        /\b(analyze|analysis|understand|breakdown|where am i spending|save money|saving tips)\b/i.test(
+          userMessage
+        );
       const range = detectRange(userMessage);
+      const effectiveVizMode = vizMode || (analysisIntent ? 'bar' : null);
       const [answer, chart] = await Promise.all([
         postChatMessage(userMessage, selectedLanguage, 'text'),
-        vizMode ? buildVisualization(vizMode, range) : Promise.resolve(null),
+        effectiveVizMode ? buildVisualization(effectiveVizMode, range) : Promise.resolve(null),
       ]);
-      if (answer || chart) {
-        const fallbackText = chart
-          ? 'I prepared a visual view of your spending data.'
-          : '';
-        appendLocalMessage('assistant', answer || fallbackText, chart ? { visualization: chart } : undefined);
+      let finalText = answer || '';
+      if (chart) {
+        const highlightPayload = await loadDebitRows(range);
+        if (highlightPayload) {
+          const highlights = buildVisualHighlightsText(highlightPayload, range);
+          finalText = finalText ? `${finalText}\n\n${highlights}` : highlights;
+        } else if (!finalText) {
+          finalText = 'I prepared a visual view of your spending data.';
+        }
       }
+      if (!finalText.trim()) {
+        finalText =
+          'I could not generate a clear response just now. Please ask again in one short sentence.';
+      }
+      appendLocalMessage('assistant', finalText, chart ? { visualization: chart } : undefined);
       setTimeout(() => {
         scrollViewRef.current?.scrollToEnd({ animated: true });
       }, 120);
     } catch (error) {
       console.error('Error sending message:', error);
+      appendLocalMessage(
+        'assistant',
+        'I could not process that right now. Please try again in a moment.'
+      );
     } finally {
       setSending(false);
     }

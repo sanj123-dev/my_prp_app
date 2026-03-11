@@ -99,6 +99,11 @@ class AssistantService:
         )
 
         response = str(output.get("response", "")).strip()
+        if not response:
+            response = (
+                "I did not get a complete response this time. "
+                "Please retry your question in a simpler way."
+            )
         citations = list(output.get("citations", []))
         agent_trace = list(output.get("agent_trace", []))
         response_style = str(output.get("response_style", "balanced"))
