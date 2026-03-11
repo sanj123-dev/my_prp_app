@@ -124,7 +124,8 @@ def create_transactions_router(db_provider) -> APIRouter:
             description = request.sms_text[:140]
             ref_id = ai_fields.get("reference_id") or _extract_ref_id(request.sms_text)
             upi_id = ai_fields.get("upi_id") or _extract_upi_id(request.sms_text)
-            merchant_name = ai_fields.get("merchant_name") or _extract_merchant_name(request.sms_text)
+            # Prefer deterministic extraction (including UPI fallback) over LLM field guesses.
+            merchant_name = _extract_merchant_name(request.sms_text) or ai_fields.get("merchant_name")
             merchant_key = f"merchant:{_normalize_merchant_label(merchant_name)}" if merchant_name else _extract_merchant_key(request.sms_text)
             bank_name = ai_fields.get("bank_name") or _extract_bank_name(request.sms_text)
             account_mask = _extract_account_mask(request.sms_text)

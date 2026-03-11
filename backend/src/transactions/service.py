@@ -275,6 +275,22 @@ def _extract_upi_id(text: str) -> Optional[str]:
     return f"{match.group(1)}@{match.group(2)}".lower()
 
 
+def _merchant_name_from_upi_id(upi_id: Optional[str]) -> Optional[str]:
+    if not upi_id:
+        return None
+    local_part = str(upi_id).split("@", 1)[0].strip()
+    if not local_part:
+        return None
+    # UPI handles often encode names with separators and digits.
+    cleaned_local = re.sub(r"[._-]+", " ", local_part)
+    cleaned_local = re.sub(r"\d+", " ", cleaned_local)
+    cleaned_local = re.sub(r"\s+", " ", cleaned_local).strip()
+    candidate = _cleanup_merchant_candidate(cleaned_local)
+    if not candidate:
+        return None
+    return candidate.title()
+
+
 def _extract_bank_name(text: str) -> Optional[str]:
     sms = (text or "").lower()
     for key in sorted(BANK_KEYWORDS, key=len, reverse=True):
@@ -300,12 +316,6 @@ def _extract_account_mask(text: str) -> Optional[str]:
 
 def _extract_merchant_name(text: str) -> Optional[str]:
     sms = text or ""
-    upi_id = _extract_upi_id(sms)
-    if upi_id:
-        left = upi_id.split("@", 1)[0]
-        upi_name = _cleanup_merchant_candidate(left.replace(".", " ").replace("_", " ").replace("-", " "))
-        if upi_name:
-            return upi_name
 
     patterns = [
         r"(?:paid to|payment to|sent to|to|at|for|towards)\s+([A-Za-z0-9&._ -]{3,64})",
@@ -318,6 +328,11 @@ def _extract_merchant_name(text: str) -> Optional[str]:
             merchant = _cleanup_merchant_candidate(match.group(1))
             if merchant:
                 return merchant
+
+    upi_id = _extract_upi_id(sms)
+    upi_name = _merchant_name_from_upi_id(upi_id)
+    if upi_name:
+        return upi_name
     return None
 
 

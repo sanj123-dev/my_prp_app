@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Platform, View } from 'react-native';
 import { Tabs, router } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { getSavedUserId } from '../../lib/auth';
 import { theme } from '../../theme/tokens';
@@ -8,18 +9,25 @@ import { theme } from '../../theme/tokens';
 export default function TabLayout() {
   const [checkingSession, setCheckingSession] = useState(true);
 
-  useEffect(() => {
-    const ensureSession = async () => {
-      const userId = await getSavedUserId();
-      if (!userId) {
-        router.replace('/login');
-        return;
-      }
-      setCheckingSession(false);
-    };
+  const ensureSession = async () => {
+    const userId = await getSavedUserId();
+    if (!userId) {
+      router.replace('/login');
+      return false;
+    }
+    setCheckingSession(false);
+    return true;
+  };
 
+  useEffect(() => {
     void ensureSession();
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void ensureSession();
+    }, [])
+  );
 
   if (checkingSession) {
     return (

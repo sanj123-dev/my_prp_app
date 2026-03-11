@@ -50,10 +50,16 @@ export default function LoginScreen() {
       subtitle="Your AI money coach. Secure sign in to continue."
     >
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'position'}
         style={styles.keyboardContainer}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 64}
       >
-        <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          showsVerticalScrollIndicator={false}
+        >
           <View style={styles.inputContainer}>
             <Ionicons name="mail-outline" size={20} color={theme.colors.textMuted} style={styles.inputIcon} />
             <TextInput
@@ -105,6 +111,8 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     gap: theme.spacing.sm,
+    paddingBottom: Platform.OS === 'android' ? 90 : theme.spacing.md,
+    flexGrow: 1,
   },
   inputContainer: {
     flexDirection: 'row',

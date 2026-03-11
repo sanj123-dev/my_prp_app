@@ -27,13 +27,16 @@ export function AuthShell({ icon, title, subtitle, children }: AuthShellProps) {
 
 const styles = StyleSheet.create({
   card: {
-    marginTop: 'auto',
-    marginBottom: 'auto',
+    marginTop: theme.spacing.lg,
+    marginBottom: theme.spacing.md,
     borderRadius: theme.radii.lg,
-    padding: theme.spacing.lg,
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.xl,
+    paddingBottom: theme.spacing.lg,
     backgroundColor: 'rgba(14, 26, 47, 0.88)',
     borderWidth: 1,
     borderColor: theme.colors.borderSoft,
+    flexShrink: 1,
     ...theme.shadows.glow,
   },
   iconWrap: {

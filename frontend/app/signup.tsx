@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -24,6 +24,13 @@ export default function SignupScreen() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const scrollRef = useRef<ScrollView>(null);
+
+  const focusScroll = (y: number) => {
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ y, animated: true });
+    });
+  };
 
   const handleSignup = async () => {
     if (!name.trim() || !email.trim() || !password.trim() || !confirmPassword.trim()) {
@@ -61,10 +68,17 @@ export default function SignupScreen() {
       subtitle="Build your automated money OS in under one minute."
     >
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.keyboardContainer}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 16}
       >
-        <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          ref={scrollRef}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          showsVerticalScrollIndicator={false}
+        >
           <View style={styles.inputContainer}>
             <Ionicons name="person-outline" size={20} color={theme.colors.textMuted} style={styles.inputIcon} />
             <TextInput
@@ -73,6 +87,7 @@ export default function SignupScreen() {
               placeholderTextColor={theme.colors.textMuted}
               value={name}
               onChangeText={setName}
+              onFocus={() => focusScroll(0)}
             />
           </View>
 
@@ -86,6 +101,7 @@ export default function SignupScreen() {
               onChangeText={setEmail}
               keyboardType="email-address"
               autoCapitalize="none"
+              onFocus={() => focusScroll(60)}
             />
           </View>
 
@@ -98,6 +114,7 @@ export default function SignupScreen() {
               value={password}
               onChangeText={setPassword}
               secureTextEntry
+              onFocus={() => focusScroll(130)}
             />
           </View>
 
@@ -110,6 +127,12 @@ export default function SignupScreen() {
               value={confirmPassword}
               onChangeText={setConfirmPassword}
               secureTextEntry
+              onFocus={() => {
+                focusScroll(320);
+                setTimeout(() => {
+                  scrollRef.current?.scrollToEnd({ animated: true });
+                }, 120);
+              }}
             />
           </View>
 
@@ -139,6 +162,8 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     gap: theme.spacing.sm,
+    paddingBottom: Platform.OS === 'android' ? 140 : theme.spacing.md,
+    flexGrow: 1,
   },
   inputContainer: {
     flexDirection: 'row',
