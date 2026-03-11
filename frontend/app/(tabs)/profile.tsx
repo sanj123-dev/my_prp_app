@@ -12,15 +12,34 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import type { Href } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { clearUserId, getSavedUserId, getUserById } from '../../lib/auth';
+import { getAppSettings } from '../../lib/profileSettings';
 
 export default function Profile() {
   const [userId, setUserId] = useState<string>('');
   const [userName, setUserName] = useState<string>('');
+  const [darkModeEnabled, setDarkModeEnabled] = useState(true);
+  const [reminderEnabled, setReminderEnabled] = useState(true);
 
   useEffect(() => {
-    loadProfile();
+    void loadProfile();
   }, []);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      const refreshSettings = async () => {
+        const settings = await getAppSettings();
+        setDarkModeEnabled(Boolean(settings.darkModeEnabled));
+        const reminderOn =
+          settings.reminders.dailyReminderEnabled ||
+          settings.reminders.billReminderEnabled ||
+          settings.reminders.weeklySummaryEnabled;
+        setReminderEnabled(reminderOn);
+      };
+      void refreshSettings();
+    }, [])
+  );
 
   const loadProfile = async () => {
     try {
@@ -104,7 +123,10 @@ export default function Profile() {
               <Ionicons name="notifications-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>Reminders</Text>
             </View>
-            <Ionicons name="chevron-forward" size={20} color="#666" />
+            <View style={styles.trailingRow}>
+              <Text style={styles.trailingText}>{reminderEnabled ? 'ON' : 'OFF'}</Text>
+              <Ionicons name="chevron-forward" size={20} color="#666" />
+            </View>
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/spending-patterns')}>
@@ -124,8 +146,8 @@ export default function Profile() {
               <Ionicons name="moon-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>Dark Mode</Text>
             </View>
-            <View style={styles.switch}>
-              <Text style={styles.switchText}>ON</Text>
+            <View style={[styles.switch, !darkModeEnabled && styles.switchOff]}>
+              <Text style={styles.switchText}>{darkModeEnabled ? 'ON' : 'OFF'}</Text>
             </View>
           </TouchableOpacity>
 
@@ -275,10 +297,23 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 12,
   },
+  switchOff: {
+    backgroundColor: '#3a3f55',
+  },
   switchText: {
     color: '#fff',
     fontSize: 12,
     fontWeight: 'bold',
+  },
+  trailingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  trailingText: {
+    color: '#96a9d7',
+    fontSize: 11,
+    fontWeight: '700',
   },
   logoutButton: {
     flexDirection: 'row',

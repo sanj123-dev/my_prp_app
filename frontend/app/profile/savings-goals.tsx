@@ -19,6 +19,19 @@ type ChatRow = {
   text: string;
 };
 
+const formatInr = (value: unknown) => {
+  const amount = Number(value ?? 0);
+  if (Number.isNaN(amount)) {
+    return '\u20B90';
+  }
+  return `\u20B9${amount.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+};
+
+const asNumber = (value: unknown) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
 export default function SavingsGoalsScreen() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -217,37 +230,120 @@ export default function SavingsGoalsScreen() {
             </View>
           )}
 
-          {latestPlan ? (
-            <View style={styles.planCard}>
-              <Text style={styles.planTitle}>Generated Plan: {latestPlan.goal_name}</Text>
-              <Text style={[styles.planLine, { marginBottom: 8 }]}>{latestPlan.summary}</Text>
-              <Text style={styles.planLine}>Required monthly: {'\u20B9'}{latestPlan.required_monthly_for_goal.toFixed(0)}</Text>
-              <Text style={styles.planLine}>Recommended monthly: {'\u20B9'}{latestPlan.monthly_budget_recommended.toFixed(0)}</Text>
-              <Text style={styles.planLine}>
-                Completion estimate: {latestPlan.projected_completion_months} months ({latestPlan.feasible_now ? 'feasible' : 'needs adjustment'})
-              </Text>
-              {latestPlan.prerequisites.length > 0 ? (
-                <View style={{ marginTop: 10 }}>
-                  <Text style={styles.planSubTitle}>Prerequisites first</Text>
-                  {latestPlan.prerequisites.map((item) => (
-                    <Text key={item.id} style={styles.planLine}>
-                      - {item.title} - {'\u20B9'}{item.suggested_monthly_allocation.toFixed(0)}/mo for ~{item.estimated_months} months
+          {latestPlan ? (() => {
+            const context = (latestPlan.household_context ?? {}) as Record<string, unknown>;
+            const snapshot = (context.financial_snapshot ?? {}) as Record<string, unknown>;
+            const affordability = (context.affordability ?? {}) as Record<string, unknown>;
+            const market = (context.market_reference ?? {}) as Record<string, unknown>;
+            const alternatives = Array.isArray(context.alternatives) ? (context.alternatives as Record<string, unknown>[]) : [];
+            const topCategories = Array.isArray(snapshot.top_spend_categories)
+              ? (snapshot.top_spend_categories as Record<string, unknown>[])
+              : [];
+
+            return (
+              <View style={styles.planCard}>
+                <Text style={styles.planTitle}>Smart Plan: {latestPlan.goal_name}</Text>
+                <Text style={[styles.planLine, { marginBottom: 10 }]}>{latestPlan.summary}</Text>
+
+                <View style={styles.sectionCard}>
+                  <Text style={styles.planSubTitle}>Financial Snapshot</Text>
+                  <Text style={styles.planLine}>Income/month: {formatInr(snapshot.monthly_income_estimate)}</Text>
+                  <Text style={styles.planLine}>Spend/month: {formatInr(snapshot.monthly_spend_estimate)}</Text>
+                  <Text style={styles.planLine}>Surplus/month: {formatInr(snapshot.monthly_surplus_estimate)}</Text>
+                  {topCategories[0] ? (
+                    <Text style={styles.planLine}>
+                      Top spend: {String(topCategories[0].name ?? 'Other')} ({formatInr(topCategories[0].amount)})
                     </Text>
-                  ))}
+                  ) : null}
                 </View>
-              ) : null}
-              {latestPlan.actionable_insights.length > 0 ? (
-                <View style={{ marginTop: 10 }}>
-                  <Text style={styles.planSubTitle}>Actionable Insights</Text>
-                  {latestPlan.actionable_insights.map((item, index) => (
-                    <Text key={`${item}-${index}`} style={styles.planLine}>
-                      - {item}
-                    </Text>
-                  ))}
+
+                <View style={styles.sectionCard}>
+                  <Text style={styles.planSubTitle}>Affordability</Text>
+                  <Text style={styles.planLine}>Status: {String(affordability.status ?? (latestPlan.feasible_now ? 'affordable' : 'stretch'))}</Text>
+                  <Text style={styles.planLine}>Target amount: {formatInr(latestPlan.target_amount)}</Text>
+                  <Text style={styles.planLine}>Required/month: {formatInr(latestPlan.required_monthly_for_goal)}</Text>
+                  <Text style={styles.planLine}>Safe recommendation/month: {formatInr(latestPlan.monthly_budget_recommended)}</Text>
+                  <Text style={styles.planLine}>
+                    Timeline: {latestPlan.projected_completion_months} months
+                  </Text>
+                  {asNumber(affordability.gap_amount) > 0 ? (
+                    <Text style={styles.warnLine}>Gap in requested timeline: {formatInr(affordability.gap_amount)}</Text>
+                  ) : null}
                 </View>
-              ) : null}
-            </View>
-          ) : null}
+
+                {(String(market.matched_item ?? '').trim() || alternatives.length > 0) ? (
+                  <View style={styles.sectionCard}>
+                    <Text style={styles.planSubTitle}>Market Reference</Text>
+                    {String(market.matched_item ?? '').trim() ? (
+                      <Text style={styles.planLine}>
+                        Matched: {String(market.matched_item)} ({formatInr(market.matched_price)})
+                      </Text>
+                    ) : null}
+                    {alternatives.length > 0 ? (
+                      <>
+                        <Text style={styles.planSubTitleSmall}>Affordable alternatives</Text>
+                        {alternatives.map((item, index) => (
+                          <Text key={`${String(item.name ?? 'alt')}-${index}`} style={styles.planLine}>
+                            - {String(item.name ?? 'Option')} ({formatInr(item.estimated_price)}) [{String(item.fit ?? 'fit')}]
+                          </Text>
+                        ))}
+                      </>
+                    ) : null}
+                  </View>
+                ) : null}
+
+                {latestPlan.prerequisites.length > 0 ? (
+                  <View style={styles.sectionCard}>
+                    <Text style={styles.planSubTitle}>Safety First</Text>
+                    {latestPlan.prerequisites.map((item) => (
+                      <Text key={item.id} style={styles.planLine}>
+                        - {item.title}: {formatInr(item.suggested_monthly_allocation)}/month for ~{item.estimated_months} months
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
+
+                {latestPlan.flow_steps.length > 0 ? (
+                  <View style={styles.sectionCard}>
+                    <Text style={styles.planSubTitle}>Execution Roadmap</Text>
+                    {latestPlan.flow_steps.map((step, index) => {
+                      const row = step as Record<string, unknown>;
+                      const actions = Array.isArray(row.actions) ? (row.actions as string[]) : [];
+                      return (
+                        <View key={`${String(row.phase ?? 'phase')}-${index}`} style={styles.stepBlock}>
+                          <Text style={styles.planLineBold}>
+                            {String(row.phase ?? `Phase ${index + 1}`)}: {String(row.title ?? 'Step')}
+                          </Text>
+                          {row.duration_months ? (
+                            <Text style={styles.planLine}>Duration: {String(row.duration_months)} months</Text>
+                          ) : null}
+                          {row.monthly_allocation ? (
+                            <Text style={styles.planLine}>Monthly allocation: {formatInr(row.monthly_allocation)}</Text>
+                          ) : null}
+                          {actions.map((action, actionIndex) => (
+                            <Text key={`${action}-${actionIndex}`} style={styles.planLine}>
+                              - {action}
+                            </Text>
+                          ))}
+                        </View>
+                      );
+                    })}
+                  </View>
+                ) : null}
+
+                {latestPlan.actionable_insights.length > 0 ? (
+                  <View style={styles.sectionCard}>
+                    <Text style={styles.planSubTitle}>Action List</Text>
+                    {latestPlan.actionable_insights.map((item, index) => (
+                      <Text key={`${item}-${index}`} style={styles.planLine}>
+                        - {item}
+                      </Text>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            );
+          })() : null}
 
           {previousPlans.length > 0 ? (
             <View style={styles.planCard}>
@@ -436,21 +532,50 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#2f4c42',
     padding: 14,
+    gap: 10,
+  },
+  sectionCard: {
+    backgroundColor: '#14251f',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#29473d',
+    padding: 10,
   },
   planTitle: {
     fontSize: 16,
     fontWeight: '700',
     color: '#fff',
-    marginBottom: 8,
   },
   planSubTitle: {
     color: '#d8ffef',
     fontWeight: '700',
     marginBottom: 6,
   },
+  planSubTitleSmall: {
+    color: '#bcefd8',
+    fontWeight: '600',
+    marginTop: 8,
+    marginBottom: 4,
+    fontSize: 13,
+  },
   planLine: {
     fontSize: 14,
     color: '#d8ffef',
     lineHeight: 20,
+  },
+  planLineBold: {
+    fontSize: 14,
+    color: '#ffffff',
+    lineHeight: 20,
+    fontWeight: '700',
+  },
+  warnLine: {
+    fontSize: 13,
+    color: '#ffd39c',
+    lineHeight: 20,
+    marginTop: 4,
+  },
+  stepBlock: {
+    marginBottom: 8,
   },
 });

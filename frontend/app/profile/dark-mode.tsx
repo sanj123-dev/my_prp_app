@@ -1,11 +1,28 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { View, Text, StyleSheet, TouchableOpacity, Switch } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
+import { getAppSettings, updateAppSettings } from '../../lib/profileSettings';
 
 export default function DarkModeScreen() {
   const [enabled, setEnabled] = useState(true);
+
+  useEffect(() => {
+    const load = async () => {
+      const settings = await getAppSettings();
+      setEnabled(Boolean(settings.darkModeEnabled));
+    };
+    void load();
+  }, []);
+
+  const toggleDarkMode = async (value: boolean) => {
+    setEnabled(value);
+    await updateAppSettings((current) => ({
+      ...current,
+      darkModeEnabled: value,
+    }));
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -18,10 +35,12 @@ export default function DarkModeScreen() {
 
       <View style={styles.row}>
         <Text style={styles.label}>Use dark theme</Text>
-        <Switch value={enabled} onValueChange={setEnabled} trackColor={{ true: '#4CAF50' }} />
+        <Switch value={enabled} onValueChange={(value) => void toggleDarkMode(value)} trackColor={{ true: '#4CAF50' }} />
       </View>
 
-      <Text style={styles.helper}>Theme persistence can be connected to AsyncStorage in the next step.</Text>
+      <Text style={styles.helper}>
+        Theme preference is saved on this device. Current mode: {enabled ? 'Dark' : 'Light'}.
+      </Text>
     </SafeAreaView>
   );
 }
