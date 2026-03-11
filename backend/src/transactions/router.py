@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 from collections import Counter
 import re
+import logging
 
 from fastapi import APIRouter, HTTPException
 
@@ -102,105 +103,111 @@ def create_transactions_router(db_provider) -> APIRouter:
 
     @router.post("/transactions/sms", response_model=Transaction)
     async def create_sms_transaction(request: SMSTransactionRequest):
-        ai_fields = await _extract_sms_fields_with_ai(request.sms_text)
-        if not bool(ai_fields.get("is_transaction")) and not _is_transaction_sms(request.sms_text):
-            raise HTTPException(status_code=422, detail="SMS is not a financial transaction alert")
+        try:
+            ai_fields = await _extract_sms_fields_with_ai(request.sms_text)
+            if not bool(ai_fields.get("is_transaction")) and not _is_transaction_sms(request.sms_text):
+                raise HTTPException(status_code=422, detail="SMS is not a financial transaction alert")
 
-        amount = None
-        if ai_fields.get("amount") is not None:
-            try:
-                amount = float(ai_fields.get("amount"))
-            except Exception:
-                amount = None
-        if amount is None:
-            amount_match = re.search(r"(?:Rs\.?|INR|\$)\s*([0-9,]+\.?[0-9]*)", request.sms_text, re.IGNORECASE)
-            if not amount_match:
-                raise HTTPException(400, "Amount not found")
-            amount = float(amount_match.group(1).replace(",", ""))
+            amount = None
+            if ai_fields.get("amount") is not None:
+                try:
+                    amount = float(ai_fields.get("amount"))
+                except Exception:
+                    amount = None
+            if amount is None:
+                amount_match = re.search(r"(?:Rs\.?|INR|\$)\s*([0-9,]+\.?[0-9]*)", request.sms_text, re.IGNORECASE)
+                if not amount_match:
+                    raise HTTPException(status_code=422, detail="Amount not found in SMS")
+                amount = float(amount_match.group(1).replace(",", ""))
 
-        transaction_date = request.date or ai_fields.get("transaction_datetime") or datetime.utcnow()
-        description = request.sms_text[:140]
-        ref_id = ai_fields.get("reference_id") or _extract_ref_id(request.sms_text)
-        upi_id = ai_fields.get("upi_id") or _extract_upi_id(request.sms_text)
-        merchant_name = ai_fields.get("merchant_name") or _extract_merchant_name(request.sms_text)
-        merchant_key = f"merchant:{_normalize_merchant_label(merchant_name)}" if merchant_name else _extract_merchant_key(request.sms_text)
-        bank_name = ai_fields.get("bank_name") or _extract_bank_name(request.sms_text)
-        account_mask = _extract_account_mask(request.sms_text)
+            transaction_date = request.date or ai_fields.get("transaction_datetime") or datetime.utcnow()
+            description = request.sms_text[:140]
+            ref_id = ai_fields.get("reference_id") or _extract_ref_id(request.sms_text)
+            upi_id = ai_fields.get("upi_id") or _extract_upi_id(request.sms_text)
+            merchant_name = ai_fields.get("merchant_name") or _extract_merchant_name(request.sms_text)
+            merchant_key = f"merchant:{_normalize_merchant_label(merchant_name)}" if merchant_name else _extract_merchant_key(request.sms_text)
+            bank_name = ai_fields.get("bank_name") or _extract_bank_name(request.sms_text)
+            account_mask = _extract_account_mask(request.sms_text)
 
-        learned_category = await _learned_category_for_transaction(
-            request.user_id,
-            merchant_key=merchant_key,
-            upi_id=upi_id,
-            description=request.sms_text,
-        )
-        category_from_ai = ai_fields.get("category")
-        transaction_type = ai_fields.get("transaction_type") or infer_transaction_type(request.sms_text)
-        rule_category = _categorize_transaction_rule_based(text=request.sms_text, transaction_type=transaction_type)
-
-        ai_result = {"category": "Other", "sentiment": "neutral"}
-        category_strategy = "fallback_other"
-        if learned_category:
-            ai_result["category"] = learned_category
-            category_strategy = "learned_rule_or_history"
-        elif rule_category and rule_category in ALLOWED_CATEGORIES:
-            ai_result["category"] = rule_category
-            category_strategy = "deterministic_rule"
-        elif category_from_ai and category_from_ai in ALLOWED_CATEGORIES:
-            ai_result["category"] = category_from_ai
-            category_strategy = "entity_extraction_ai"
-        else:
-            ai_result = await categorize_transaction_with_ai(request.sms_text, amount)
-            category_strategy = "llm_classifier"
-
-        if ref_id:
-            existing_by_ref = await db.transactions.find_one({"user_id": request.user_id, "source": "sms", "ref_id": ref_id})
-            if existing_by_ref:
-                return Transaction(**existing_by_ref)
-
-        start_window = transaction_date - timedelta(minutes=3)
-        end_window = transaction_date + timedelta(minutes=3)
-        fallback_query: Dict[str, Any] = {
-            "user_id": request.user_id,
-            "source": "sms",
-            "amount": amount,
-            "date": {"$gte": start_window, "$lte": end_window},
-        }
-        if merchant_key:
-            fallback_query["$or"] = [{"merchant_key": merchant_key}, {"description": description}]
-        else:
-            fallback_query["description"] = description
-
-        existing_sms_transaction = await db.transactions.find_one(fallback_query)
-        if existing_sms_transaction:
-            return Transaction(**existing_sms_transaction)
-
-        trans_obj = Transaction(
-            user_id=request.user_id,
-            amount=amount,
-            category=ai_result["category"],
-            description=description,
-            date=transaction_date,
-            source="sms",
-            transaction_type=transaction_type,
-            sentiment=ai_result["sentiment"],
-            ref_id=ref_id,
-            merchant_key=merchant_key,
-            merchant_name=merchant_name,
-            bank_name=bank_name,
-            account_mask=account_mask,
-            upi_id=upi_id,
-        )
-        await db.transactions.insert_one(trans_obj.dict())
-
-        if ai_result["category"] != "Other" and (merchant_key or upi_id):
-            await _save_category_rule(
-                user_id=request.user_id,
-                category=ai_result["category"],
+            learned_category = await _learned_category_for_transaction(
+                request.user_id,
                 merchant_key=merchant_key,
                 upi_id=upi_id,
-                strength_increment=2 if category_strategy in {"learned_rule_or_history", "deterministic_rule"} else 1,
+                description=request.sms_text,
             )
-        return trans_obj
+            category_from_ai = ai_fields.get("category")
+            transaction_type = ai_fields.get("transaction_type") or infer_transaction_type(request.sms_text)
+            rule_category = _categorize_transaction_rule_based(text=request.sms_text, transaction_type=transaction_type)
+
+            ai_result = {"category": "Other", "sentiment": "neutral"}
+            category_strategy = "fallback_other"
+            if learned_category:
+                ai_result["category"] = learned_category
+                category_strategy = "learned_rule_or_history"
+            elif rule_category and rule_category in ALLOWED_CATEGORIES:
+                ai_result["category"] = rule_category
+                category_strategy = "deterministic_rule"
+            elif category_from_ai and category_from_ai in ALLOWED_CATEGORIES:
+                ai_result["category"] = category_from_ai
+                category_strategy = "entity_extraction_ai"
+            else:
+                ai_result = await categorize_transaction_with_ai(request.sms_text, amount)
+                category_strategy = "llm_classifier"
+
+            if ref_id:
+                existing_by_ref = await db.transactions.find_one({"user_id": request.user_id, "source": "sms", "ref_id": ref_id})
+                if existing_by_ref:
+                    return Transaction(**existing_by_ref)
+
+            start_window = transaction_date - timedelta(minutes=3)
+            end_window = transaction_date + timedelta(minutes=3)
+            fallback_query: Dict[str, Any] = {
+                "user_id": request.user_id,
+                "source": "sms",
+                "amount": amount,
+                "date": {"$gte": start_window, "$lte": end_window},
+            }
+            if merchant_key:
+                fallback_query["$or"] = [{"merchant_key": merchant_key}, {"description": description}]
+            else:
+                fallback_query["description"] = description
+
+            existing_sms_transaction = await db.transactions.find_one(fallback_query)
+            if existing_sms_transaction:
+                return Transaction(**existing_sms_transaction)
+
+            trans_obj = Transaction(
+                user_id=request.user_id,
+                amount=amount,
+                category=ai_result["category"],
+                description=description,
+                date=transaction_date,
+                source="sms",
+                transaction_type=transaction_type,
+                sentiment=ai_result["sentiment"],
+                ref_id=ref_id,
+                merchant_key=merchant_key,
+                merchant_name=merchant_name,
+                bank_name=bank_name,
+                account_mask=account_mask,
+                upi_id=upi_id,
+            )
+            await db.transactions.insert_one(trans_obj.dict())
+
+            if ai_result["category"] != "Other" and (merchant_key or upi_id):
+                await _save_category_rule(
+                    user_id=request.user_id,
+                    category=ai_result["category"],
+                    merchant_key=merchant_key,
+                    upi_id=upi_id,
+                    strength_increment=2 if category_strategy in {"learned_rule_or_history", "deterministic_rule"} else 1,
+                )
+            return trans_obj
+        except HTTPException:
+            raise
+        except Exception as error:
+            logging.exception("SMS transaction import failed for user %s: %s", request.user_id, error)
+            raise HTTPException(status_code=422, detail="Unable to process this SMS safely")
 
     @router.post("/transactions/{transaction_id}/similar-preview", response_model=TransactionSimilarityResponse)
     async def preview_similar_transactions(transaction_id: str, request: TransactionSimilarityRequest):

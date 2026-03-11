@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
+import { getAxiosErrorDetails } from './httpError';
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -363,11 +364,21 @@ export const syncSmsTransactions = async ({
           created.push(response.data);
           importedSet.add(smsId);
         } catch (error) {
-          if (axios.isAxiosError(error) && error.response?.status === 422) {
-            importedSet.add(smsId);
-            continue;
+          if (axios.isAxiosError(error) && error.response?.status) {
+            const status = error.response.status;
+            // Invalid or duplicate SMS: mark as scanned and move on.
+            if (status === 400 || status === 409 || status === 422) {
+              importedSet.add(smsId);
+              continue;
+            }
+            // Backend/transient failure for one SMS should not abort full sync.
+            if (status >= 500) {
+              console.error('Skipping SMS due to server error:', getAxiosErrorDetails(error));
+              continue;
+            }
           }
-          throw error;
+          console.error('Skipping SMS due to request error:', getAxiosErrorDetails(error));
+          continue;
         }
         if (onProgress) {
           onProgress({

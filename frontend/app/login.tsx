@@ -15,7 +15,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { Link, router } from 'expo-router';
 import { AuthShell } from '../components/auth/AuthShell';
 import { login, saveUserId } from '../lib/auth';
-import { requestSmsPermission } from '../lib/smsSync';
 import { theme } from '../theme/tokens';
 
 export default function LoginScreen() {
@@ -36,7 +35,6 @@ export default function LoginScreen() {
         password,
       });
       await saveUserId(user.id);
-      await requestSmsPermission();
       router.replace('/(tabs)/dashboard');
     } catch (error) {
       Alert.alert('Login Failed', error instanceof Error ? error.message : 'Unable to login');

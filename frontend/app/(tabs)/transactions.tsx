@@ -32,9 +32,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { formatINR } from '../../lib/currency';
+import { getAxiosErrorDetails } from '../../lib/httpError';
 import {
   clearSmsAuthTrigger,
   getSmsAuthTrigger,
+  requestSmsPermission,
   startRealtimeSmsSync,
   syncSmsTransactions,
 } from '../../lib/smsSync';
@@ -57,6 +59,11 @@ const CATEGORIES = [
   'Transfer',
   'Other',
 ];
+
+const wait = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 interface Transaction {
   id: string;
@@ -249,7 +256,7 @@ export default function Transactions() {
         void bootstrapSmsImport(savedUserId);
       }
     } catch (error) {
-      console.error('Error loading transactions:', error);
+      console.error('Error loading transactions:', getAxiosErrorDetails(error));
     } finally {
       setLoading(false);
     }
@@ -277,10 +284,18 @@ export default function Transactions() {
       const trigger = await getSmsAuthTrigger();
       if (trigger === 'signup') {
         setAutoImporting(true);
+        let permissionGranted = await requestSmsPermission();
+        if (!permissionGranted) {
+          await wait(600);
+          permissionGranted = await requestSmsPermission();
+        }
+        if (!permissionGranted) {
+          return;
+        }
         await syncSmsTransactions({
           userId: uid,
           mode: trigger,
-          requestPermission: true,
+          requestPermission: false,
           onTransactionsCreated: (items) => mergeTransactions(items as Transaction[]),
         });
         await clearSmsAuthTrigger();
@@ -299,7 +314,7 @@ export default function Transactions() {
         }, LIVE_SMS_SYNC_INTERVAL_MS);
       }
     } catch (error) {
-      console.error('Error bootstrapping SMS import:', error);
+      console.error('Error bootstrapping SMS import:', getAxiosErrorDetails(error));
     } finally {
       setAutoImporting(false);
     }
@@ -347,7 +362,7 @@ export default function Transactions() {
         );
       }
     } catch (error) {
-      console.error('Error requesting SMS permission:', error);
+      console.error('Error requesting SMS permission:', getAxiosErrorDetails(error));
     } finally {
       setAutoImporting(false);
     }
@@ -392,7 +407,7 @@ export default function Transactions() {
       setShowSmsModal(false);
       Alert.alert('Success', `Imported ${created.length} SMS transaction${created.length === 1 ? '' : 's'}.`);
     } catch (error) {
-      console.error('Error importing SMS transactions:', error);
+      console.error('Error importing SMS transactions:', getAxiosErrorDetails(error));
       Alert.alert('Error', 'Failed to import SMS transactions.');
     } finally {
       setSmsProcessing(false);
@@ -422,7 +437,7 @@ export default function Transactions() {
       setShowAddModal(false);
       Alert.alert('Success', `Added in ${response.data.category}`);
     } catch (error) {
-      console.error('Error adding transaction:', error);
+      console.error('Error adding transaction:', getAxiosErrorDetails(error));
       Alert.alert('Error', 'Failed to add transaction');
     } finally {
       setProcessing(false);
@@ -457,7 +472,7 @@ export default function Transactions() {
       setShowCategoryModal(false);
       setSelectedTransaction(null);
     } catch (error) {
-      console.error('Error updating category:', error);
+      console.error('Error updating category:', getAxiosErrorDetails(error));
       Alert.alert('Error', 'Failed to update category.');
     } finally {
       setUpdatingCategory(false);
@@ -505,7 +520,7 @@ export default function Transactions() {
         ]
       );
     } catch (error) {
-      console.error('Error previewing similar transactions:', error);
+      console.error('Error previewing similar transactions:', getAxiosErrorDetails(error));
       await updateTransactionCategory(category, false);
     } finally {
       setUpdatingCategory(false);

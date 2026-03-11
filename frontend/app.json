@@ -23,6 +23,7 @@
                                                       "backgroundColor":  "#000"
                                                   },
                                  "edgeToEdgeEnabled":  true,
+                                 "softwareKeyboardLayoutMode": "resize",
                                  "permissions":  [
                                                      "READ_SMS",
                                                      "RECEIVE_SMS",

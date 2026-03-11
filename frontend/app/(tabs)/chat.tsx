@@ -22,6 +22,7 @@ import * as Speech from 'expo-speech';
 import { format } from 'date-fns';
 import { BarChart, LineChart, PieChart } from 'react-native-gifted-charts';
 import { useAssistantChat } from '../../hooks/useAssistantChat';
+import { getAxiosErrorDetails } from '../../lib/httpError';
 
 type SpeechRecognitionModuleShape = {
   requestPermissionsAsync: () => Promise<{ granted: boolean; canAskAgain?: boolean }>;
@@ -963,7 +964,7 @@ export default function Chat() {
         scrollViewRef.current?.scrollToEnd({ animated: true });
       }, 120);
     } catch (error) {
-      console.error('Error sending message:', error);
+      console.error('Error sending message:', getAxiosErrorDetails(error));
       appendLocalMessage(
         'assistant',
         'I could not process that right now. Please try again in a moment.'

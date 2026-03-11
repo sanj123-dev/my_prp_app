@@ -20,9 +20,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { formatINR } from '../../lib/currency';
+import { getAxiosErrorDetails } from '../../lib/httpError';
 import {
   clearSmsAuthTrigger,
   getSmsAuthTrigger,
+  requestSmsPermission,
   startRealtimeSmsSync,
   syncSmsTransactions,
 } from '../../lib/smsSync';
@@ -90,6 +92,11 @@ const FALLBACK_FINANCIAL_NEWS: FinancialNewsItem[] = [
     sentiment: 'neutral',
   },
 ];
+
+const wait = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 export default function Dashboard() {
   const [insights, setInsights] = useState<string>('');
@@ -170,7 +177,7 @@ export default function Dashboard() {
         }
       }
     } catch (error) {
-      console.error('Error loading data:', error);
+      console.error('Error loading data:', getAxiosErrorDetails(error));
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -194,10 +201,22 @@ export default function Dashboard() {
         setSmsReadCount(0);
         setSmsImportedCount(0);
         setSmsProgressPercent(4);
+        let permissionGranted = await requestSmsPermission();
+        if (!permissionGranted) {
+          // Some devices briefly fail permission APIs right after route transition.
+          await wait(600);
+          permissionGranted = await requestSmsPermission();
+        }
+        if (!permissionGranted) {
+          setSmsSyncStatusText('SMS permission is needed to import your transaction messages.');
+          setSmsProgressPercent(0);
+          return;
+        }
+
         const createdCount = await syncSmsTransactions({
           userId: uid,
           mode: authTrigger,
-          requestPermission: true,
+          requestPermission: false,
           onProgress: (progress) => {
             setSmsReadCount(progress.scannedCount);
             setSmsImportedCount(progress.importedCount);
@@ -237,7 +256,7 @@ export default function Dashboard() {
         }, LIVE_SMS_SYNC_INTERVAL_MS);
       }
     } catch (error) {
-      console.error('Error bootstrapping SMS flow:', error);
+      console.error('Error bootstrapping SMS flow:', getAxiosErrorDetails(error));
     } finally {
       setSmsSyncInProgress(false);
     }
@@ -255,7 +274,7 @@ export default function Dashboard() {
       );
       setTodayTransactions(today);
     } catch (error) {
-      console.error('Error fetching monthly transactions:', error);
+      console.error('Error fetching monthly transactions:', getAxiosErrorDetails(error));
     }
   };
 
@@ -266,7 +285,7 @@ export default function Dashboard() {
       );
       setInsights(response.data.insights);
     } catch (error) {
-      console.error('Error fetching insights:', error);
+      console.error('Error fetching insights:', getAxiosErrorDetails(error));
     }
   };
 
@@ -277,7 +296,7 @@ export default function Dashboard() {
       );
       setNews(response.data || []);
     } catch (error) {
-      console.error('Error fetching financial news:', error);
+      console.error('Error fetching financial news:', getAxiosErrorDetails(error));
       setNews(FALLBACK_FINANCIAL_NEWS);
     }
   };
