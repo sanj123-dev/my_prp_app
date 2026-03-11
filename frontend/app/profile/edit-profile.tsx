@@ -13,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import {
+  clearUserId,
   getSavedUserId,
   getUserById,
   updateUserProfile,
@@ -87,7 +88,13 @@ export default function EditProfileScreen() {
         const user = await getUserById(savedUserId);
         setForm(toFormState(user));
       } catch (error) {
-        Alert.alert('Error', error instanceof Error ? error.message : 'Unable to load profile');
+        const message = error instanceof Error ? error.message : 'Unable to load profile';
+        if (String(message).toLowerCase().includes('user not found')) {
+          await clearUserId();
+          router.replace('/login');
+          return;
+        }
+        Alert.alert('Error', message);
       } finally {
         setLoading(false);
       }

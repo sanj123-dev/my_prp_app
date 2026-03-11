@@ -25,14 +25,21 @@ export default function Profile() {
   const loadProfile = async () => {
     try {
       const savedUserId = await getSavedUserId();
-      if (savedUserId) {
-        setUserId(savedUserId);
-        const user = await getUserById(savedUserId);
-        const fullName = `${user.first_name ?? ''} ${user.last_name ?? ''}`.trim();
-        setUserName(fullName || user.name);
+      if (!savedUserId) {
+        router.replace('/login');
+        return;
       }
+      setUserId(savedUserId);
+      const user = await getUserById(savedUserId);
+      const fullName = `${user.first_name ?? ''} ${user.last_name ?? ''}`.trim();
+      setUserName(fullName || user.name);
     } catch (error) {
       console.error('Error loading profile:', error);
+      const message = error instanceof Error ? error.message : String(error ?? '');
+      if (message.toLowerCase().includes('user not found')) {
+        await clearUserId();
+        router.replace('/login');
+      }
     }
   };
 

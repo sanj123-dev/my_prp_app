@@ -188,7 +188,7 @@ export default function Dashboard() {
   async function bootstrapSmsFlow(uid: string, isFirstRun: boolean) {
     try {
       const authTrigger = await getSmsAuthTrigger();
-      if (authTrigger === 'signup' || authTrigger === 'login') {
+      if (authTrigger === 'signup') {
         setSmsSyncInProgress(true);
         setSmsSyncStatusText('Reading your SMS transactions...');
         setSmsReadCount(0);
@@ -219,6 +219,9 @@ export default function Dashboard() {
           await fetchAllTransactions(uid);
         }
         setSmsProgressPercent(100);
+      } else if (authTrigger === 'login') {
+        // Legacy trigger cleanup: login should not run historical SMS import.
+        await clearSmsAuthTrigger();
       }
 
       if (!liveSyncIntervalRef.current) {

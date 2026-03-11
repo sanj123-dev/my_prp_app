@@ -20,7 +20,7 @@ import re
 import xml.etree.ElementTree as ET
 from html import unescape
 from urllib.request import urlopen, Request
-from passlib.context import CryptContext
+import bcrypt
 import requests
 
 from openai import AsyncOpenAI
@@ -52,13 +52,23 @@ groq_client = AsyncOpenAI(
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 RUPEE_SYMBOL = "\u20B9"
 VOICE_VAD_SILENCE_MS = int(os.environ.get("VOICE_VAD_SILENCE_MS", "900"))
 VOICE_TTS_PROVIDER = (os.environ.get("VOICE_TTS_PROVIDER", "none") or "none").strip().lower()
 ELEVENLABS_API_KEY = (os.environ.get("ELEVENLABS_API_KEY", "") or "").strip()
 ELEVENLABS_VOICE_ID = (os.environ.get("ELEVENLABS_VOICE_ID", "") or "").strip()
 _assistant_service: Optional[AssistantService] = None
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except Exception:
+        return False
 
 
 def _parse_cors_origins() -> List[str]:
@@ -1004,7 +1014,7 @@ async def signup(request: SignupRequest):
     # Legacy fallback: some old users may exist without a password hash.
     # Convert that record into an auth-capable account instead of blocking signup.
     if existing_user and not existing_user.get("password_hash"):
-        password_hash = pwd_context.hash(request.password)
+        password_hash = _hash_password(request.password)
         await db.users.update_one(
             {"id": existing_user["id"]},
             {
@@ -1026,7 +1036,7 @@ async def signup(request: SignupRequest):
     )
 
     user_doc = user_obj.dict()
-    user_doc["password_hash"] = pwd_context.hash(request.password)
+    user_doc["password_hash"] = _hash_password(request.password)
     await db.users.insert_one(user_doc)
     return user_obj
 
@@ -1044,7 +1054,7 @@ async def login(request: LoginRequest):
             status_code=400,
             detail="Account exists without password. Please sign up again to set a password.",
         )
-    if not pwd_context.verify(request.password, password_hash):
+    if not _verify_password(request.password, password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     return User(**existing_user)

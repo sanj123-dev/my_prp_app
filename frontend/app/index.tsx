@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { router } from 'expo-router';
-import { getSavedUserId } from '../lib/auth';
+import { clearUserId, getSavedUserId, getUserById } from '../lib/auth';
 import { GradientSurface } from '../components/layout/GradientSurface';
 import { theme } from '../theme/tokens';
 
@@ -10,7 +10,17 @@ export default function Index() {
     const bootstrap = async () => {
       const userId = await getSavedUserId();
       if (userId) {
-        router.replace('/(tabs)/dashboard');
+        try {
+          await getUserById(userId);
+          router.replace('/(tabs)/dashboard');
+          return;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error ?? '');
+          if (message.toLowerCase().includes('user not found')) {
+            await clearUserId();
+          }
+        }
+        router.replace('/login');
         return;
       }
       router.replace('/login');

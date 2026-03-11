@@ -275,7 +275,7 @@ export default function Transactions() {
   async function bootstrapSmsImport(uid: string) {
     try {
       const trigger = await getSmsAuthTrigger();
-      if (trigger === 'signup' || trigger === 'login') {
+      if (trigger === 'signup') {
         setAutoImporting(true);
         await syncSmsTransactions({
           userId: uid,
@@ -283,6 +283,9 @@ export default function Transactions() {
           requestPermission: true,
           onTransactionsCreated: (items) => mergeTransactions(items as Transaction[]),
         });
+        await clearSmsAuthTrigger();
+      } else if (trigger === 'login') {
+        // Legacy trigger cleanup: login should not run historical SMS import.
         await clearSmsAuthTrigger();
       }
 

@@ -15,7 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Link, router } from 'expo-router';
 import { AuthShell } from '../components/auth/AuthShell';
 import { login, saveUserId } from '../lib/auth';
-import { requestSmsPermission, setSmsAuthTrigger } from '../lib/smsSync';
+import { requestSmsPermission } from '../lib/smsSync';
 import { theme } from '../theme/tokens';
 
 export default function LoginScreen() {
@@ -36,7 +36,6 @@ export default function LoginScreen() {
         password,
       });
       await saveUserId(user.id);
-      await setSmsAuthTrigger('login');
       await requestSmsPermission();
       router.replace('/(tabs)/dashboard');
     } catch (error) {
