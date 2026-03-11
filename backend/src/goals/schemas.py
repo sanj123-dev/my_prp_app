@@ -76,3 +76,82 @@ class GoalPlannerProgress(BaseModel):
     assistant_message: str
     question: Optional[GoalPlannerQuestion] = None
     completed_plan: Optional[GoalPlan] = None
+
+
+V2InputType = Literal["text", "number", "boolean", "choice"]
+V2SessionStatus = Literal["collecting", "planning", "completed", "cancelled"]
+
+
+class GoalPlannerV2Prompt(BaseModel):
+    key: str
+    prompt: str
+    input_type: V2InputType
+    required: bool = True
+    choices: List[str] = Field(default_factory=list)
+    placeholder: Optional[str] = None
+    help_text: Optional[str] = None
+
+
+class GoalPlannerV2Panel(BaseModel):
+    id: str
+    title: str
+    summary: Optional[str] = None
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class GoalPlannerV2Plan(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    session_id: str
+    source: Literal["v1", "v2"] = "v2"
+    goal_type: str
+    goal_title: str
+    target_amount: float
+    target_months: int
+    estimated_monthly_required: float
+    recommended_monthly: float
+    projected_completion_months: int
+    feasible_now: bool
+    confidence: float = 0.0
+    cost_model: Dict[str, Any] = Field(default_factory=dict)
+    feasibility: Dict[str, Any] = Field(default_factory=dict)
+    alternatives: List[Dict[str, Any]] = Field(default_factory=list)
+    execution_phases: List[Dict[str, Any]] = Field(default_factory=list)
+    panels: List[GoalPlannerV2Panel] = Field(default_factory=list)
+    summary: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class GoalPlannerV2Session(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    status: V2SessionStatus = "collecting"
+    turn_count: int = 0
+    max_turns: int = 10
+    goal_context: Dict[str, Any] = Field(default_factory=dict)
+    unresolved_fields: List[str] = Field(default_factory=list)
+    agent_outputs: Dict[str, Any] = Field(default_factory=dict)
+    dialogue: List[Dict[str, Any]] = Field(default_factory=list)
+    confidence: float = 0.0
+    plan_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class GoalPlannerV2StartRequest(BaseModel):
+    user_id: str
+    force_new: bool = False
+
+
+class GoalPlannerV2TurnRequest(BaseModel):
+    message: Any
+
+
+class GoalPlannerV2Progress(BaseModel):
+    session_id: str
+    status: Literal["collecting", "planning", "completed"]
+    assistant_message: str
+    next_prompt: Optional[GoalPlannerV2Prompt] = None
+    panels: List[GoalPlannerV2Panel] = Field(default_factory=list)
+    progress: Dict[str, Any] = Field(default_factory=dict)
+    plan: Optional[GoalPlannerV2Plan] = None

@@ -1,16 +1,17 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { View, Text, StyleSheet, TouchableOpacity, TextInput, ScrollView, ActivityIndicator, Alert } from 'react-native';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { getSavedUserId } from '../../lib/auth';
 import {
-  GoalPlan,
-  GoalPlannerProgress,
-  GoalPlannerQuestion,
-  getGoalPlans,
-  startGoalPlanner,
-  submitGoalPlannerAnswer,
+  GoalPlannerV2Panel,
+  GoalPlannerV2Plan,
+  GoalPlannerV2Progress,
+  GoalPlannerV2Prompt,
+  getGoalPlansV2,
+  startGoalPlannerV2,
+  submitGoalPlannerTurnV2,
 } from '../../lib/goalPlannerApi';
 
 type ChatRow = {
@@ -19,17 +20,10 @@ type ChatRow = {
   text: string;
 };
 
-const formatInr = (value: unknown) => {
-  const amount = Number(value ?? 0);
-  if (Number.isNaN(amount)) {
-    return '\u20B90';
-  }
-  return `\u20B9${amount.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
-};
-
-const asNumber = (value: unknown) => {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
+const formatInr = (v: unknown) => {
+  const n = Number(v ?? 0);
+  if (Number.isNaN(n)) return '\u20B90';
+  return `\u20B9${n.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 };
 
 export default function SavingsGoalsScreen() {
@@ -37,12 +31,13 @@ export default function SavingsGoalsScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [userId, setUserId] = useState('');
   const [sessionId, setSessionId] = useState('');
-  const [progress, setProgress] = useState<GoalPlannerProgress | null>(null);
-  const [question, setQuestion] = useState<GoalPlannerQuestion | null>(null);
-  const [input, setInput] = useState('');
+  const [progress, setProgress] = useState<GoalPlannerV2Progress | null>(null);
+  const [prompt, setPrompt] = useState<GoalPlannerV2Prompt | null>(null);
+  const [panels, setPanels] = useState<GoalPlannerV2Panel[]>([]);
+  const [latestPlan, setLatestPlan] = useState<GoalPlannerV2Plan | null>(null);
+  const [plans, setPlans] = useState<GoalPlannerV2Plan[]>([]);
   const [chat, setChat] = useState<ChatRow[]>([]);
-  const [latestPlan, setLatestPlan] = useState<GoalPlan | null>(null);
-  const [previousPlans, setPreviousPlans] = useState<GoalPlan[]>([]);
+  const [input, setInput] = useState('');
 
   useEffect(() => {
     void bootstrap(false);
@@ -51,17 +46,17 @@ export default function SavingsGoalsScreen() {
   const bootstrap = async (forceNew: boolean) => {
     try {
       setLoading(true);
-      const savedUserId = await getSavedUserId();
-      if (!savedUserId) {
+      const saved = await getSavedUserId();
+      if (!saved) {
         Alert.alert('Login required', 'Please login to use goal planner.');
         router.replace('/login');
         return;
       }
-      setUserId(savedUserId);
-      const payload = await startGoalPlanner(savedUserId, forceNew);
-      hydrateFromProgress(payload, true);
-      const plans = await getGoalPlans(savedUserId, 5);
-      setPreviousPlans(plans);
+      setUserId(saved);
+      const payload = await startGoalPlannerV2(saved, forceNew);
+      hydrate(payload, true);
+      const previous = await getGoalPlansV2(saved, 8);
+      setPlans(previous);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to load planner';
       Alert.alert('Goal Planner', message);
@@ -70,70 +65,50 @@ export default function SavingsGoalsScreen() {
     }
   };
 
-  const hydrateFromProgress = (payload: GoalPlannerProgress, resetChat = false) => {
+  const hydrate = (payload: GoalPlannerV2Progress, resetChat = false) => {
     setSessionId(payload.session_id);
     setProgress(payload);
-    setQuestion(payload.question ?? null);
-    if (payload.completed_plan) {
-      setLatestPlan(payload.completed_plan);
-    }
-    const assistantText = payload.question
-      ? `${payload.assistant_message}\n\n${payload.question.prompt}`
-      : payload.assistant_message;
+    setPrompt(payload.next_prompt ?? null);
+    setPanels(payload.panels ?? []);
+    if (payload.plan) setLatestPlan(payload.plan);
+
+    const assistantText = payload.next_prompt ? `${payload.assistant_message}\n\n${payload.next_prompt.prompt}` : payload.assistant_message;
     setChat((prev) => {
       const base = resetChat ? [] : prev;
       const last = base.length > 0 ? base[base.length - 1] : null;
-      if (last && last.role === 'assistant' && last.text.trim() === assistantText.trim()) {
-        return base;
-      }
-      return [
-        ...base,
-        {
-          id: `a-${Date.now()}-${Math.random()}`,
-          role: 'assistant',
-          text: assistantText,
-        },
-      ];
+      if (last && last.role === 'assistant' && last.text.trim() === assistantText.trim()) return base;
+      return [...base, { id: `a-${Date.now()}-${Math.random()}`, role: 'assistant', text: assistantText }];
     });
   };
 
-  const submitAnswer = async (rawAnswer: string | boolean) => {
-    if (!question || !sessionId || !userId) {
-      return;
-    }
-    let answer: string | number | boolean = rawAnswer;
-    if (question.answer_type === 'number') {
-      const numeric = Number(rawAnswer);
-      if (Number.isNaN(numeric)) {
+  const submitTurn = async (raw: string | boolean) => {
+    if (!userId || !sessionId || !prompt) return;
+    let outgoing: string | number | boolean = raw;
+    if (prompt.input_type === 'number') {
+      const n = Number(raw);
+      if (Number.isNaN(n)) {
         Alert.alert('Invalid input', 'Please enter a valid number.');
         return;
       }
-      answer = numeric;
+      outgoing = n;
     }
-    if (question.answer_type === 'text' && `${rawAnswer}`.trim().length === 0) {
+    if (prompt.input_type === 'text' && `${raw}`.trim().length === 0) {
       Alert.alert('Missing input', 'Please enter your answer.');
       return;
     }
 
     try {
       setSubmitting(true);
-      setChat((prev) => [
-        ...prev,
-        {
-          id: `u-${Date.now()}-${Math.random()}`,
-          role: 'user',
-          text: `${rawAnswer}`,
-        },
-      ]);
+      setChat((prev) => [...prev, { id: `u-${Date.now()}-${Math.random()}`, role: 'user', text: `${raw}` }]);
       setInput('');
-      const payload = await submitGoalPlannerAnswer(sessionId, userId, answer);
-      hydrateFromProgress(payload);
-      if (payload.completed_plan) {
-        const plans = await getGoalPlans(userId, 5);
-        setPreviousPlans(plans);
+      const payload = await submitGoalPlannerTurnV2(sessionId, userId, outgoing);
+      hydrate(payload);
+      if (payload.plan) {
+        const previous = await getGoalPlansV2(userId, 8);
+        setPlans(previous);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to submit answer';
+      const message = error instanceof Error ? error.message : 'Unable to send planner message';
       Alert.alert('Goal Planner', message);
     } finally {
       setSubmitting(false);
@@ -141,10 +116,10 @@ export default function SavingsGoalsScreen() {
   };
 
   const keyboardType = useMemo<'default' | 'numeric'>(
-    () => (question?.answer_type === 'number' ? 'numeric' : 'default'),
-    [question]
+    () => (prompt?.input_type === 'number' ? 'numeric' : 'default'),
+    [prompt]
   );
-  const isCompleted = progress?.status === 'completed';
+  const isDone = progress?.status === 'completed';
 
   return (
     <SafeAreaView style={styles.container}>
@@ -153,8 +128,8 @@ export default function SavingsGoalsScreen() {
           <Ionicons name="chevron-back" size={20} color="#fff" />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.title}>Goal Planner</Text>
-          <Text style={styles.subtitle}>Human-like budget planning</Text>
+          <Text style={styles.title}>Goal Planner v2</Text>
+          <Text style={styles.subtitle}>Adaptive personal planning agent</Text>
         </View>
         <TouchableOpacity style={styles.restartButton} onPress={() => void bootstrap(true)}>
           <Ionicons name="refresh" size={16} color="#fff" />
@@ -168,14 +143,6 @@ export default function SavingsGoalsScreen() {
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
-          <View style={styles.progressCard}>
-            <Text style={styles.progressLabel}>Planner progress</Text>
-            <View style={styles.progressTrack}>
-              <View style={[styles.progressFill, { width: `${progress?.progress_pct ?? 0}%` }]} />
-            </View>
-            <Text style={styles.progressValue}>{Math.round(progress?.progress_pct ?? 0)}%</Text>
-          </View>
-
           <View style={styles.chatCard}>
             {chat.map((row) => (
               <View key={row.id} style={[styles.bubble, row.role === 'assistant' ? styles.assistantBubble : styles.userBubble]}>
@@ -184,173 +151,81 @@ export default function SavingsGoalsScreen() {
             ))}
           </View>
 
-          {!isCompleted && question && (
+          {!isDone && prompt ? (
             <View style={styles.inputCard}>
-              {question.help_text ? <Text style={styles.helpText}>{question.help_text}</Text> : null}
-              {question.answer_type === 'boolean' ? (
+              {prompt.help_text ? <Text style={styles.helpText}>{prompt.help_text}</Text> : null}
+              {prompt.input_type === 'boolean' ? (
                 <View style={styles.choiceWrap}>
-                  <TouchableOpacity style={styles.choiceBtn} onPress={() => void submitAnswer('yes')}>
+                  <TouchableOpacity style={styles.choiceBtn} onPress={() => void submitTurn('yes')}>
                     <Text style={styles.choiceText}>Yes</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={styles.choiceBtn} onPress={() => void submitAnswer('no')}>
+                  <TouchableOpacity style={styles.choiceBtn} onPress={() => void submitTurn('no')}>
                     <Text style={styles.choiceText}>No</Text>
                   </TouchableOpacity>
                 </View>
               ) : null}
-
-              {question.answer_type === 'choice' ? (
+              {prompt.input_type === 'choice' ? (
                 <View style={styles.choiceWrap}>
-                  {question.choices.map((item) => (
-                    <TouchableOpacity key={item} style={styles.choiceBtn} onPress={() => void submitAnswer(item)}>
+                  {prompt.choices.map((item) => (
+                    <TouchableOpacity key={item} style={styles.choiceBtn} onPress={() => void submitTurn(item)}>
                       <Text style={styles.choiceText}>{item}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
               ) : null}
-
-              {question.answer_type !== 'boolean' && question.answer_type !== 'choice' ? (
+              {prompt.input_type !== 'choice' && prompt.input_type !== 'boolean' ? (
                 <View style={styles.inputRow}>
                   <TextInput
                     value={input}
                     onChangeText={setInput}
-                    placeholder={question.placeholder ?? 'Type your answer'}
+                    placeholder={prompt.placeholder ?? 'Type your answer'}
                     placeholderTextColor="#8087a2"
                     style={styles.input}
                     keyboardType={keyboardType}
                   />
-                  <TouchableOpacity
-                    style={[styles.sendBtn, submitting && { opacity: 0.6 }]}
-                    disabled={submitting}
-                    onPress={() => void submitAnswer(input)}
-                  >
+                  <TouchableOpacity style={[styles.sendBtn, submitting && { opacity: 0.6 }]} disabled={submitting} onPress={() => void submitTurn(input)}>
                     <Ionicons name="send" size={16} color="#fff" />
                   </TouchableOpacity>
                 </View>
               ) : null}
             </View>
-          )}
+          ) : null}
 
-          {latestPlan ? (() => {
-            const context = (latestPlan.household_context ?? {}) as Record<string, unknown>;
-            const snapshot = (context.financial_snapshot ?? {}) as Record<string, unknown>;
-            const affordability = (context.affordability ?? {}) as Record<string, unknown>;
-            const market = (context.market_reference ?? {}) as Record<string, unknown>;
-            const alternatives = Array.isArray(context.alternatives) ? (context.alternatives as Record<string, unknown>[]) : [];
-            const topCategories = Array.isArray(snapshot.top_spend_categories)
-              ? (snapshot.top_spend_categories as Record<string, unknown>[])
-              : [];
-
-            return (
-              <View style={styles.planCard}>
-                <Text style={styles.planTitle}>Smart Plan: {latestPlan.goal_name}</Text>
-                <Text style={[styles.planLine, { marginBottom: 10 }]}>{latestPlan.summary}</Text>
-
-                <View style={styles.sectionCard}>
-                  <Text style={styles.planSubTitle}>Financial Snapshot</Text>
-                  <Text style={styles.planLine}>Income/month: {formatInr(snapshot.monthly_income_estimate)}</Text>
-                  <Text style={styles.planLine}>Spend/month: {formatInr(snapshot.monthly_spend_estimate)}</Text>
-                  <Text style={styles.planLine}>Surplus/month: {formatInr(snapshot.monthly_surplus_estimate)}</Text>
-                  {topCategories[0] ? (
-                    <Text style={styles.planLine}>
-                      Top spend: {String(topCategories[0].name ?? 'Other')} ({formatInr(topCategories[0].amount)})
+          {panels.length > 0 ? (
+            <View style={styles.planCard}>
+              <Text style={styles.planTitle}>Planner Insights</Text>
+              {panels.map((panel) => (
+                <View key={panel.id} style={styles.sectionCard}>
+                  <Text style={styles.planSubTitle}>{panel.title}</Text>
+                  {panel.summary ? <Text style={styles.planLine}>{panel.summary}</Text> : null}
+                  {panel.items.map((item, idx) => (
+                    <Text key={`${panel.id}-${idx}`} style={styles.planLine}>
+                      - {item.label}: {item.value}
                     </Text>
-                  ) : null}
+                  ))}
                 </View>
+              ))}
+            </View>
+          ) : null}
 
-                <View style={styles.sectionCard}>
-                  <Text style={styles.planSubTitle}>Affordability</Text>
-                  <Text style={styles.planLine}>Status: {String(affordability.status ?? (latestPlan.feasible_now ? 'affordable' : 'stretch'))}</Text>
-                  <Text style={styles.planLine}>Target amount: {formatInr(latestPlan.target_amount)}</Text>
-                  <Text style={styles.planLine}>Required/month: {formatInr(latestPlan.required_monthly_for_goal)}</Text>
-                  <Text style={styles.planLine}>Safe recommendation/month: {formatInr(latestPlan.monthly_budget_recommended)}</Text>
-                  <Text style={styles.planLine}>
-                    Timeline: {latestPlan.projected_completion_months} months
-                  </Text>
-                  {asNumber(affordability.gap_amount) > 0 ? (
-                    <Text style={styles.warnLine}>Gap in requested timeline: {formatInr(affordability.gap_amount)}</Text>
-                  ) : null}
-                </View>
+          {latestPlan ? (
+            <View style={styles.planCard}>
+              <Text style={styles.planTitle}>Final Plan</Text>
+              <Text style={styles.planLine}>Goal: {latestPlan.goal_title}</Text>
+              <Text style={styles.planLine}>Target: {formatInr(latestPlan.target_amount)}</Text>
+              <Text style={styles.planLine}>Required/month: {formatInr(latestPlan.estimated_monthly_required)}</Text>
+              <Text style={styles.planLine}>Recommended/month: {formatInr(latestPlan.recommended_monthly)}</Text>
+              <Text style={styles.planLine}>Projected completion: {latestPlan.projected_completion_months} months</Text>
+              <Text style={styles.planLine}>{latestPlan.summary}</Text>
+            </View>
+          ) : null}
 
-                {(String(market.matched_item ?? '').trim() || alternatives.length > 0) ? (
-                  <View style={styles.sectionCard}>
-                    <Text style={styles.planSubTitle}>Market Reference</Text>
-                    {String(market.matched_item ?? '').trim() ? (
-                      <Text style={styles.planLine}>
-                        Matched: {String(market.matched_item)} ({formatInr(market.matched_price)})
-                      </Text>
-                    ) : null}
-                    {alternatives.length > 0 ? (
-                      <>
-                        <Text style={styles.planSubTitleSmall}>Affordable alternatives</Text>
-                        {alternatives.map((item, index) => (
-                          <Text key={`${String(item.name ?? 'alt')}-${index}`} style={styles.planLine}>
-                            - {String(item.name ?? 'Option')} ({formatInr(item.estimated_price)}) [{String(item.fit ?? 'fit')}]
-                          </Text>
-                        ))}
-                      </>
-                    ) : null}
-                  </View>
-                ) : null}
-
-                {latestPlan.prerequisites.length > 0 ? (
-                  <View style={styles.sectionCard}>
-                    <Text style={styles.planSubTitle}>Safety First</Text>
-                    {latestPlan.prerequisites.map((item) => (
-                      <Text key={item.id} style={styles.planLine}>
-                        - {item.title}: {formatInr(item.suggested_monthly_allocation)}/month for ~{item.estimated_months} months
-                      </Text>
-                    ))}
-                  </View>
-                ) : null}
-
-                {latestPlan.flow_steps.length > 0 ? (
-                  <View style={styles.sectionCard}>
-                    <Text style={styles.planSubTitle}>Execution Roadmap</Text>
-                    {latestPlan.flow_steps.map((step, index) => {
-                      const row = step as Record<string, unknown>;
-                      const actions = Array.isArray(row.actions) ? (row.actions as string[]) : [];
-                      return (
-                        <View key={`${String(row.phase ?? 'phase')}-${index}`} style={styles.stepBlock}>
-                          <Text style={styles.planLineBold}>
-                            {String(row.phase ?? `Phase ${index + 1}`)}: {String(row.title ?? 'Step')}
-                          </Text>
-                          {row.duration_months ? (
-                            <Text style={styles.planLine}>Duration: {String(row.duration_months)} months</Text>
-                          ) : null}
-                          {row.monthly_allocation ? (
-                            <Text style={styles.planLine}>Monthly allocation: {formatInr(row.monthly_allocation)}</Text>
-                          ) : null}
-                          {actions.map((action, actionIndex) => (
-                            <Text key={`${action}-${actionIndex}`} style={styles.planLine}>
-                              - {action}
-                            </Text>
-                          ))}
-                        </View>
-                      );
-                    })}
-                  </View>
-                ) : null}
-
-                {latestPlan.actionable_insights.length > 0 ? (
-                  <View style={styles.sectionCard}>
-                    <Text style={styles.planSubTitle}>Action List</Text>
-                    {latestPlan.actionable_insights.map((item, index) => (
-                      <Text key={`${item}-${index}`} style={styles.planLine}>
-                        - {item}
-                      </Text>
-                    ))}
-                  </View>
-                ) : null}
-              </View>
-            );
-          })() : null}
-
-          {previousPlans.length > 0 ? (
+          {plans.length > 0 ? (
             <View style={styles.planCard}>
               <Text style={styles.planSubTitle}>Previous Plans</Text>
-              {previousPlans.map((item) => (
+              {plans.map((item) => (
                 <Text key={item.id} style={styles.planLine}>
-                  - {item.goal_name} ({item.projected_completion_months} months)
+                  - [{item.source.toUpperCase()}] {item.goal_title} ({item.projected_completion_months} months)
                 </Text>
               ))}
             </View>
@@ -362,220 +237,31 @@ export default function SavingsGoalsScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0f0f1e',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
-    gap: 10,
-  },
-  backButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#1a1a2e',
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#fff',
-  },
-  subtitle: {
-    color: '#9aa0b4',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  restartButton: {
-    backgroundColor: '#1a1a2e',
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-    borderRadius: 14,
-    paddingHorizontal: 10,
-    height: 32,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  restartText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  loaderWrap: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  content: {
-    paddingHorizontal: 20,
-    paddingBottom: 24,
-    gap: 12,
-  },
-  progressCard: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-    padding: 16,
-  },
-  progressLabel: {
-    color: '#9aa0b4',
-    fontSize: 12,
-    marginBottom: 8,
-  },
-  progressTrack: {
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#111629',
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#4CAF50',
-  },
-  progressValue: {
-    color: '#fff',
-    marginTop: 8,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  chatCard: {
-    backgroundColor: '#121a2f',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#243252',
-    padding: 12,
-    gap: 8,
-  },
-  bubble: {
-    borderRadius: 12,
-    padding: 10,
-  },
-  assistantBubble: {
-    backgroundColor: '#1b2740',
-  },
-  userBubble: {
-    backgroundColor: '#233f2f',
-    alignSelf: 'flex-end',
-  },
-  bubbleText: {
-    color: '#e8ecff',
-    lineHeight: 20,
-    fontSize: 14,
-  },
-  inputCard: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-    padding: 12,
-    gap: 10,
-  },
-  helpText: {
-    color: '#8f98b4',
-    fontSize: 12,
-  },
-  choiceWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  choiceBtn: {
-    backgroundColor: '#273351',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#344978',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-  },
-  choiceText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  inputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  input: {
-    flex: 1,
-    backgroundColor: '#10182d',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#344978',
-    color: '#fff',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
-  },
-  sendBtn: {
-    height: 42,
-    width: 42,
-    borderRadius: 10,
-    backgroundColor: '#4CAF50',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  planCard: {
-    backgroundColor: '#18241f',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#2f4c42',
-    padding: 14,
-    gap: 10,
-  },
-  sectionCard: {
-    backgroundColor: '#14251f',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#29473d',
-    padding: 10,
-  },
-  planTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#fff',
-  },
-  planSubTitle: {
-    color: '#d8ffef',
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  planSubTitleSmall: {
-    color: '#bcefd8',
-    fontWeight: '600',
-    marginTop: 8,
-    marginBottom: 4,
-    fontSize: 13,
-  },
-  planLine: {
-    fontSize: 14,
-    color: '#d8ffef',
-    lineHeight: 20,
-  },
-  planLineBold: {
-    fontSize: 14,
-    color: '#ffffff',
-    lineHeight: 20,
-    fontWeight: '700',
-  },
-  warnLine: {
-    fontSize: 13,
-    color: '#ffd39c',
-    lineHeight: 20,
-    marginTop: 4,
-  },
-  stepBlock: {
-    marginBottom: 8,
-  },
+  container: { flex: 1, backgroundColor: '#0f0f1e' },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 16, paddingBottom: 12, gap: 10 },
+  backButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: '#2a2a3e', alignItems: 'center', justifyContent: 'center' },
+  title: { fontSize: 22, fontWeight: '700', color: '#fff' },
+  subtitle: { color: '#9aa0b4', fontSize: 12, marginTop: 2 },
+  restartButton: { backgroundColor: '#1a1a2e', borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 14, paddingHorizontal: 10, height: 32, flexDirection: 'row', alignItems: 'center', gap: 4 },
+  restartText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+  loaderWrap: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  content: { paddingHorizontal: 20, paddingBottom: 24, gap: 12 },
+  chatCard: { backgroundColor: '#121a2f', borderRadius: 14, borderWidth: 1, borderColor: '#243252', padding: 12, gap: 8 },
+  bubble: { borderRadius: 12, padding: 10 },
+  assistantBubble: { backgroundColor: '#1b2740' },
+  userBubble: { backgroundColor: '#233f2f', alignSelf: 'flex-end' },
+  bubbleText: { color: '#e8ecff', lineHeight: 20, fontSize: 14 },
+  inputCard: { backgroundColor: '#1a1a2e', borderRadius: 14, borderWidth: 1, borderColor: '#2a2a3e', padding: 12, gap: 10 },
+  helpText: { color: '#8f98b4', fontSize: 12 },
+  choiceWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  choiceBtn: { backgroundColor: '#273351', borderRadius: 10, borderWidth: 1, borderColor: '#344978', paddingVertical: 8, paddingHorizontal: 12 },
+  choiceText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  inputRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  input: { flex: 1, backgroundColor: '#10182d', borderRadius: 10, borderWidth: 1, borderColor: '#344978', color: '#fff', paddingHorizontal: 12, paddingVertical: 10, fontSize: 14 },
+  sendBtn: { height: 42, width: 42, borderRadius: 10, backgroundColor: '#4CAF50', alignItems: 'center', justifyContent: 'center' },
+  planCard: { backgroundColor: '#18241f', borderRadius: 14, borderWidth: 1, borderColor: '#2f4c42', padding: 14, gap: 10 },
+  sectionCard: { backgroundColor: '#14251f', borderRadius: 12, borderWidth: 1, borderColor: '#29473d', padding: 10, gap: 4 },
+  planTitle: { fontSize: 16, fontWeight: '700', color: '#fff' },
+  planSubTitle: { color: '#d8ffef', fontWeight: '700', marginBottom: 6 },
+  planLine: { fontSize: 14, color: '#d8ffef', lineHeight: 20 },
 });
