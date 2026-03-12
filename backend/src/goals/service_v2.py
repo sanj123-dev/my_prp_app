@@ -24,6 +24,8 @@ PRODUCT_BENCHMARKS = [
     {"kind": "laptop", "name": "MacBook Air", "aliases": ["macbook"], "price_inr": 110000},
 ]
 
+MERCADO_SITES = ["MLM", "MLA", "MCO"]
+
 TRIP_BENCHMARKS = {
     "japan": {"budget": 9000, "standard": 13000, "premium": 22000, "flight": 55000, "visa": 2500},
     "thailand": {"budget": 5000, "standard": 8500, "premium": 15000, "flight": 22000, "visa": 3000},
@@ -106,6 +108,7 @@ class GoalPlannerV2Service:
                 alt_key = remaining[1]
                 prompt_map = {
                     "goal_text": GoalPlannerV2Prompt(key="goal_text", prompt="What goal do you want to plan?", input_type="text", required=True),
+                    "target_amount": GoalPlannerV2Prompt(key="target_amount", prompt="What is your target amount for this goal? (INR)", input_type="number", required=True),
                     "target_months": GoalPlannerV2Prompt(key="target_months", prompt="In how many months do you want to complete this goal?", input_type="number", required=True),
                     "current_savings": GoalPlannerV2Prompt(key="current_savings", prompt="How much have you already saved for this goal?", input_type="number", required=True),
                     "monthly_commitment": GoalPlannerV2Prompt(key="monthly_commitment", prompt="How much can you save monthly for this goal?", input_type="number", required=True),
@@ -249,15 +252,28 @@ class GoalPlannerV2Service:
         if kind == "foreign_trip":
             live = await self._live_trip(g)
             if live.get("source") == "live_api":
+                if user_target > 0:
+                    live["market_estimate_inr"] = _f(live.get("estimated_total_inr", 0.0))
+                    live["estimated_total_inr"] = round(user_target, 2)
+                    assumptions = list(live.get("assumptions", []))
+                    assumptions.append("User target amount overrides estimate for planning.")
+                    live["assumptions"] = assumptions
                 return live
             bench = self._bench_trip(g)
             if user_target > 0:
+                bench["market_estimate_inr"] = _f(bench.get("estimated_total_inr", 0.0))
                 bench["estimated_total_inr"] = user_target
             return bench
+        live = await self._live_product(goal_text or kind)
+        if live.get("source") == "live_api":
+            if user_target > 0:
+                live["market_estimate_inr"] = _f(live.get("estimated_total_inr", 0.0))
+                live["estimated_total_inr"] = round(user_target, 2)
+                assumptions = list(live.get("assumptions", []))
+                assumptions.append("User target amount overrides estimate for planning.")
+                live["assumptions"] = assumptions
+            return live
         if kind in {"bike", "car", "phone", "laptop"}:
-            live = await self._live_product(goal_text or kind)
-            if live.get("source") == "live_api":
-                return live
             cands = [x for x in PRODUCT_BENCHMARKS if x["kind"] == kind]
             sel = cands[0] if cands else {"name": "Estimated", "price_inr": 100000}
             for x in cands:
@@ -293,14 +309,22 @@ class GoalPlannerV2Service:
         kind = str(g.get("goal_kind", "general"))
         out: List[Dict[str, Any]] = []
         if kind in {"bike", "car", "phone", "laptop"}:
-            rows = sorted([x for x in PRODUCT_BENCHMARKS if x["kind"] == kind], key=lambda x: _f(x["price_inr"]))
-            for r in rows[:4]:
-                p = _f(r["price_inr"])
-                if bool(f.get("feasible_now", False)):
-                    fit = "on_track" if p <= max(limit, _f(f.get("target_amount_inr", 0.0))) else "upgrade"
-                else:
-                    fit = "strong" if p <= limit else "stretch"
-                out.append({"name": r["name"], "estimated_price_inr": round(p, 2), "fit": fit})
+            market_opts = list((g.get("cost_model", {}) or {}).get("market_options", []))
+            if market_opts:
+                sorted_opts = sorted(market_opts, key=lambda x: _f(x.get("amount_inr", 0.0)))
+                for opt in sorted_opts[:4]:
+                    p = _f(opt.get("amount_inr", 0.0))
+                    fit = "strong" if p <= max(limit, _f(f.get("target_amount_inr", 0.0))) else "stretch"
+                    out.append({"name": str(opt.get("label", "Market Option")), "estimated_price_inr": round(p, 2), "fit": fit})
+            else:
+                rows = sorted([x for x in PRODUCT_BENCHMARKS if x["kind"] == kind], key=lambda x: _f(x["price_inr"]))
+                for r in rows[:4]:
+                    p = _f(r["price_inr"])
+                    if bool(f.get("feasible_now", False)):
+                        fit = "on_track" if p <= max(limit, _f(f.get("target_amount_inr", 0.0))) else "upgrade"
+                    else:
+                        fit = "strong" if p <= limit else "stretch"
+                    out.append({"name": r["name"], "estimated_price_inr": round(p, 2), "fit": fit})
         if kind == "foreign_trip":
             d = str(g.get("trip_destination", "thailand")).lower()
             days = max(3, _i(g.get("trip_days", 7), 7))
@@ -336,6 +360,8 @@ class GoalPlannerV2Service:
         m = []
         if not g.get("goal_text"):
             m.append("goal_text")
+        if not g.get("target_amount"):
+            m.append("target_amount")
         if not g.get("target_months"):
             m.append("target_months")
         if g.get("current_savings") is None:
@@ -367,6 +393,7 @@ class GoalPlannerV2Service:
         key = m[0] if m else "goal_text"
         p = {
             "goal_text": GoalPlannerV2Prompt(key="goal_text", prompt="What goal do you want to plan?", input_type="text", required=True),
+            "target_amount": GoalPlannerV2Prompt(key="target_amount", prompt="What is your target amount for this goal? (INR)", input_type="number", required=True, placeholder="Example: 150000"),
             "target_months": GoalPlannerV2Prompt(key="target_months", prompt="In how many months do you want to complete this goal?", input_type="number", required=True, placeholder="Example: 12"),
             "current_savings": GoalPlannerV2Prompt(key="current_savings", prompt="How much have you already saved for this goal?", input_type="number", required=True, placeholder="Example: 20000"),
             "monthly_commitment": GoalPlannerV2Prompt(key="monthly_commitment", prompt="How much can you save monthly for this goal?", input_type="number", required=True, placeholder="Example: 12000"),
@@ -480,14 +507,20 @@ class GoalPlannerV2Service:
 
     async def _live_product(self, query: str) -> Dict[str, Any]:
         try:
-            data = self._http_get_json("https://dummyjson.com/products/search", {"q": query}, timeout=4, retries=2)
-            products = list(data.get("products", []))
-            if not products:
-                raise ValueError("no products")
-            usd = _f(products[0].get("price", 0.0))
-            rate = await self._usd_inr()
-            inr = round(usd * rate, 2)
-            return {"source": "live_api", "confidence": 0.75, "estimated_total_inr": inr, "line_items": [{"label": str(products[0].get("title", "Market Price")), "amount_inr": inr}], "fallback_reason": "", "assumptions": ["Live product API + FX conversion used."]}
+            market_options = await self._live_market_options(query)
+            if not market_options:
+                raise ValueError("no live options")
+            options_sorted = sorted(market_options, key=lambda x: _f(x.get("amount_inr", 0.0)))
+            baseline = _f(options_sorted[max(0, len(options_sorted) // 2)].get("amount_inr", 0.0))
+            return {
+                "source": "live_api",
+                "confidence": 0.78,
+                "estimated_total_inr": round(baseline, 2),
+                "line_items": options_sorted[:6],
+                "market_options": options_sorted[:6],
+                "fallback_reason": "",
+                "assumptions": ["Live marketplace results converted to INR median estimate."],
+            }
         except Exception:
             return {"source": "benchmark", "confidence": 0.45, "estimated_total_inr": 0.0, "line_items": [], "fallback_reason": "live_api_failed", "assumptions": ["Live API failed, benchmark fallback used."]}
 
@@ -551,7 +584,7 @@ class GoalPlannerV2Service:
             if n <= 0:
                 raise ValueError("Please enter a valid positive number.")
             return n
-        if key in {"current_savings", "monthly_commitment"}:
+        if key in {"current_savings", "monthly_commitment", "target_amount"}:
             n = _f(value, -1)
             if n < 0:
                 raise ValueError("Please enter a valid amount.")
@@ -621,6 +654,62 @@ class GoalPlannerV2Service:
         if err:
             raise err
         return {}
+
+    async def _live_market_options(self, query: str) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        clean_query = (query or "").strip() or "consumer product"
+        for site in MERCADO_SITES:
+            try:
+                payload = self._http_get_json(
+                    f"https://api.mercadolibre.com/sites/{site}/search",
+                    {"q": clean_query, "limit": 8},
+                    timeout=5,
+                    retries=2,
+                )
+                results = list(payload.get("results", []))
+                for row in results:
+                    amount = _f(row.get("price", 0.0))
+                    currency = str(row.get("currency_id", "USD")).upper()
+                    if amount <= 0:
+                        continue
+                    inr = await self._to_inr(amount, currency)
+                    if inr <= 0:
+                        continue
+                    out.append(
+                        {
+                            "label": str(row.get("title", "Market Option"))[:90],
+                            "amount_inr": round(inr, 2),
+                        }
+                    )
+            except Exception:
+                continue
+        dedup: Dict[str, Dict[str, Any]] = {}
+        for item in out:
+            key = f"{item['label']}-{int(_f(item['amount_inr'], 0))}"
+            dedup[key] = item
+        return list(dedup.values())[:12]
+
+    async def _to_inr(self, amount: float, currency: str) -> float:
+        cur = (currency or "").upper().strip()
+        if cur == "INR":
+            return amount
+        if cur == "USD":
+            return amount * (await self._usd_inr())
+        try:
+            data = self._http_get_json(
+                "https://api.frankfurter.app/latest",
+                {"from": cur, "to": "INR"},
+                timeout=4,
+                retries=2,
+            )
+            rate = _f(dict(data.get("rates", {})).get("INR", 0.0))
+            if rate > 0:
+                return amount * rate
+        except Exception:
+            pass
+        # coarse fallback map for unsupported currencies
+        coarse = {"MXN": 4.9, "ARS": 0.08, "COP": 0.02, "EUR": 90.0, "GBP": 105.0}
+        return amount * _f(coarse.get(cur, 0.0), 0.0)
 
 
 async def init_goal_module_v2(db: Any) -> None:

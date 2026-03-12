@@ -131,8 +131,8 @@ export default function SavingsGoalsScreen() {
           <Ionicons name="chevron-back" size={20} color="#fff" />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
-          <Text style={styles.title}>Goal Planner v2</Text>
-          <Text style={styles.subtitle}>Adaptive personal planning agent</Text>
+          <Text style={styles.title}>Goal Planner</Text>
+          <Text style={styles.subtitle}>Adaptive personal financial planner</Text>
         </View>
         <TouchableOpacity style={styles.restartButton} onPress={() => void bootstrap(true)}>
           <Ionicons name="refresh" size={16} color="#fff" />
