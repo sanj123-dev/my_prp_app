@@ -36,6 +36,7 @@ export default function SavingsGoalsScreen() {
   const [panels, setPanels] = useState<GoalPlannerV2Panel[]>([]);
   const [latestPlan, setLatestPlan] = useState<GoalPlannerV2Plan | null>(null);
   const [plans, setPlans] = useState<GoalPlannerV2Plan[]>([]);
+  const [selectedPlan, setSelectedPlan] = useState<GoalPlannerV2Plan | null>(null);
   const [chat, setChat] = useState<ChatRow[]>([]);
   const [input, setInput] = useState('');
 
@@ -57,6 +58,7 @@ export default function SavingsGoalsScreen() {
       hydrate(payload, true);
       const previous = await getGoalPlansV2(saved, 8);
       setPlans(previous);
+      setSelectedPlan(previous.length > 0 ? previous[0] : null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to load planner';
       Alert.alert('Goal Planner', message);
@@ -106,6 +108,7 @@ export default function SavingsGoalsScreen() {
       if (payload.plan) {
         const previous = await getGoalPlansV2(userId, 8);
         setPlans(previous);
+        setSelectedPlan(previous.length > 0 ? previous[0] : null);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to send planner message';
@@ -222,12 +225,31 @@ export default function SavingsGoalsScreen() {
 
           {plans.length > 0 ? (
             <View style={styles.planCard}>
-              <Text style={styles.planSubTitle}>Previous Plans</Text>
-              {plans.map((item) => (
-                <Text key={item.id} style={styles.planLine}>
-                  - [{item.source.toUpperCase()}] {item.goal_title} ({item.projected_completion_months} months)
-                </Text>
-              ))}
+              <Text style={styles.planTitle}>Previous Goals</Text>
+              <View style={styles.goalGrid}>
+                {plans.map((item) => (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={[styles.goalCard, selectedPlan?.id === item.id ? styles.goalCardActive : null]}
+                    onPress={() => setSelectedPlan(item)}
+                  >
+                    <Text style={styles.goalCardTitle}>{item.goal_title}</Text>
+                    <Text style={styles.goalCardMeta}>{formatInr(item.target_amount)}</Text>
+                    <Text style={styles.goalCardMeta}>{item.projected_completion_months} months</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {selectedPlan ? (
+                <View style={styles.selectedCard}>
+                  <Text style={styles.planSubTitle}>Goal Detail</Text>
+                  <Text style={styles.planLine}>Goal: {selectedPlan.goal_title}</Text>
+                  <Text style={styles.planLine}>Target: {formatInr(selectedPlan.target_amount)}</Text>
+                  <Text style={styles.planLine}>Required/month: {formatInr(selectedPlan.estimated_monthly_required)}</Text>
+                  <Text style={styles.planLine}>Recommended/month: {formatInr(selectedPlan.recommended_monthly)}</Text>
+                  <Text style={styles.planLine}>Projection: {selectedPlan.projected_completion_months} months</Text>
+                  <Text style={styles.planLine}>{selectedPlan.summary}</Text>
+                </View>
+              ) : null}
             </View>
           ) : null}
         </ScrollView>
@@ -261,6 +283,12 @@ const styles = StyleSheet.create({
   sendBtn: { height: 42, width: 42, borderRadius: 10, backgroundColor: '#4CAF50', alignItems: 'center', justifyContent: 'center' },
   planCard: { backgroundColor: '#18241f', borderRadius: 14, borderWidth: 1, borderColor: '#2f4c42', padding: 14, gap: 10 },
   sectionCard: { backgroundColor: '#14251f', borderRadius: 12, borderWidth: 1, borderColor: '#29473d', padding: 10, gap: 4 },
+  selectedCard: { backgroundColor: '#102018', borderRadius: 12, borderWidth: 1, borderColor: '#2f5d4d', padding: 10, gap: 6 },
+  goalGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  goalCard: { width: '48%', backgroundColor: '#112036', borderRadius: 12, borderWidth: 1, borderColor: '#243252', padding: 10, gap: 4 },
+  goalCardActive: { borderColor: '#4CAF50', backgroundColor: '#142b22' },
+  goalCardTitle: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  goalCardMeta: { color: '#b8c7ef', fontSize: 12 },
   planTitle: { fontSize: 16, fontWeight: '700', color: '#fff' },
   planSubTitle: { color: '#d8ffef', fontWeight: '700', marginBottom: 6 },
   planLine: { fontSize: 14, color: '#d8ffef', lineHeight: 20 },

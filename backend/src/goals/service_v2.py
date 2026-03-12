@@ -100,6 +100,22 @@ class GoalPlannerV2Service:
             )
 
         prompt = self._next_prompt(s)
+        if prompt.key == expected:
+            remaining = self._missing(dict(s.goal_context))
+            if len(remaining) > 1:
+                alt_key = remaining[1]
+                prompt_map = {
+                    "goal_text": GoalPlannerV2Prompt(key="goal_text", prompt="What goal do you want to plan?", input_type="text", required=True),
+                    "target_months": GoalPlannerV2Prompt(key="target_months", prompt="In how many months do you want to complete this goal?", input_type="number", required=True),
+                    "current_savings": GoalPlannerV2Prompt(key="current_savings", prompt="How much have you already saved for this goal?", input_type="number", required=True),
+                    "monthly_commitment": GoalPlannerV2Prompt(key="monthly_commitment", prompt="How much can you save monthly for this goal?", input_type="number", required=True),
+                    "goal_model": GoalPlannerV2Prompt(key="goal_model", prompt="Any specific model in mind? (or type 'skip')", input_type="text", required=False),
+                    "trip_destination": GoalPlannerV2Prompt(key="trip_destination", prompt="Which country is this trip for?", input_type="text", required=True),
+                    "trip_days": GoalPlannerV2Prompt(key="trip_days", prompt="How many days for this trip?", input_type="number", required=True),
+                    "trip_travelers": GoalPlannerV2Prompt(key="trip_travelers", prompt="How many travelers?", input_type="number", required=True),
+                    "trip_style": GoalPlannerV2Prompt(key="trip_style", prompt="Preferred trip style?", input_type="choice", choices=["budget", "standard", "premium"], required=True),
+                }
+                prompt = prompt_map.get(alt_key, prompt)
         s.goal_context["expected_prompt_key"] = prompt.key
         msg = f"I need one more detail: {prompt.prompt}"
         s.dialogue.append({"role": "assistant", "content": msg, "ts": datetime.utcnow().isoformat()})
@@ -273,8 +289,6 @@ class GoalPlannerV2Service:
 
     def _alternatives(self, g: Dict[str, Any]) -> List[Dict[str, Any]]:
         f = dict(g.get("feasibility", {}))
-        if bool(f.get("feasible_now", False)):
-            return []
         limit = _f(f.get("affordable_in_timeline_inr", 0.0))
         kind = str(g.get("goal_kind", "general"))
         out: List[Dict[str, Any]] = []
@@ -282,7 +296,11 @@ class GoalPlannerV2Service:
             rows = sorted([x for x in PRODUCT_BENCHMARKS if x["kind"] == kind], key=lambda x: _f(x["price_inr"]))
             for r in rows[:4]:
                 p = _f(r["price_inr"])
-                out.append({"name": r["name"], "estimated_price_inr": round(p, 2), "fit": "strong" if p <= limit else "stretch"})
+                if bool(f.get("feasible_now", False)):
+                    fit = "on_track" if p <= max(limit, _f(f.get("target_amount_inr", 0.0))) else "upgrade"
+                else:
+                    fit = "strong" if p <= limit else "stretch"
+                out.append({"name": r["name"], "estimated_price_inr": round(p, 2), "fit": fit})
         if kind == "foreign_trip":
             d = str(g.get("trip_destination", "thailand")).lower()
             days = max(3, _i(g.get("trip_days", 7), 7))
@@ -290,7 +308,27 @@ class GoalPlannerV2Service:
             for st in ["budget", "standard", "premium"]:
                 e = self._bench_trip({"trip_destination": d, "trip_days": days, "trip_travelers": t, "trip_style": st})
                 p = _f(e.get("estimated_total_inr", 0.0))
-                out.append({"name": f"{d.title()} ({st})", "estimated_price_inr": round(p, 2), "fit": "strong" if p <= limit else "stretch"})
+                if bool(f.get("feasible_now", False)):
+                    fit = "recommended" if st in {"budget", "standard"} else "premium_option"
+                else:
+                    fit = "strong" if p <= limit else "stretch"
+                out.append({"name": f"{d.title()} ({st})", "estimated_price_inr": round(p, 2), "fit": fit})
+        if kind == "general":
+            out.extend(
+                [
+                    {"name": "Core plan", "estimated_price_inr": round(_f(f.get("target_amount_inr", 0.0)), 2), "fit": "recommended"},
+                    {
+                        "name": "Fast-track plan (+15% monthly savings)",
+                        "estimated_price_inr": round(_f(f.get("target_amount_inr", 0.0)), 2),
+                        "fit": "faster",
+                    },
+                    {
+                        "name": "Comfort plan (+20% timeline)",
+                        "estimated_price_inr": round(_f(f.get("target_amount_inr", 0.0)), 2),
+                        "fit": "easier",
+                    },
+                ]
+            )
         return out[:4]
 
     def _missing(self, g: Dict[str, Any]) -> List[str]:
@@ -313,8 +351,6 @@ class GoalPlannerV2Service:
                 m.append("trip_travelers")
             if not g.get("trip_style"):
                 m.append("trip_style")
-        if kind in {"bike", "car", "phone", "laptop"} and not g.get("goal_model"):
-            m.append("goal_model")
         return m
 
     def _confidence(self, g: Dict[str, Any], missing: List[str]) -> float:
@@ -526,6 +562,8 @@ class GoalPlannerV2Service:
                 raise ValueError("Choose one: budget, standard, premium.")
             return t
         t = str(value or "").strip()
+        if key == "goal_model" and t.lower() in {"skip", "none", "na", "n/a"}:
+            return ""
         if not t:
             raise ValueError("Please provide a value.")
         return t[:250]
