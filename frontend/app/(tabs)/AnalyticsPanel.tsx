@@ -15,6 +15,7 @@ import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BarChart, LineChart, PieChart } from 'react-native-gifted-charts';
 import { endOfMonth, format, isWithinInterval, startOfMonth, subMonths } from 'date-fns';
+import { router } from 'expo-router';
 import { formatINR } from '../../lib/currency';
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
@@ -451,9 +452,17 @@ export default function AnalyticsPanel({ variant = 'full' }: AnalyticsPanelProps
               <Text style={styles.title}>Analytics Story</Text>
               <Text style={styles.subtitle}>Month-wise spending trends and financial views</Text>
             </View>
-            <View style={styles.headerBadge}>
-              <Ionicons name="sparkles" size={16} color="#fff" />
-              <Text style={styles.headerBadgeText}>AI</Text>
+            <View style={styles.headerRight}>
+              <View style={styles.headerBadge}>
+                <Ionicons name="sparkles" size={16} color="#fff" />
+                <Text style={styles.headerBadgeText}>AI</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.headerProfileButton}
+                onPress={() => router.push('/(tabs)/profile')}
+              >
+                <Ionicons name="person-circle-outline" size={24} color="#fff" />
+              </TouchableOpacity>
             </View>
           </View>
         )}
@@ -874,6 +883,21 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '700',
     fontSize: 12,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  headerProfileButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1f2946',
+    borderWidth: 1,
+    borderColor: '#314272',
   },
   heroCard: {
     marginHorizontal: 24,

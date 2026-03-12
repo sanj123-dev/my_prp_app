@@ -21,6 +21,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Speech from 'expo-speech';
 import { format } from 'date-fns';
 import { BarChart, LineChart, PieChart } from 'react-native-gifted-charts';
+import { router } from 'expo-router';
 import { useAssistantChat } from '../../hooks/useAssistantChat';
 import { getAxiosErrorDetails } from '../../lib/httpError';
 
@@ -1308,6 +1309,12 @@ export default function Chat() {
             <Text style={styles.headerSubtext}>Chat + Voice Assistant</Text>
           </View>
         </View>
+        <TouchableOpacity
+          style={styles.headerProfileButton}
+          onPress={() => router.push('/(tabs)/profile')}
+        >
+          <Ionicons name="person-circle-outline" size={25} color="#fff" />
+        </TouchableOpacity>
       </View>
 
       <KeyboardAvoidingView
@@ -1511,6 +1518,9 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#2a2a3e',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   aiHeader: {
     flexDirection: 'row',
@@ -1533,6 +1543,16 @@ const styles = StyleSheet.create({
   headerSubtext: {
     fontSize: 12,
     color: '#999',
+  },
+  headerProfileButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1f2946',
+    borderWidth: 1,
+    borderColor: '#314272',
   },
   messagesContainer: {
     flex: 1,

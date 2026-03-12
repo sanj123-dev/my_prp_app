@@ -10,6 +10,7 @@ from .schemas import (
     GoalPlannerProgress,
     GoalPlannerStartRequest,
     GoalPlannerV2Plan,
+    GoalPlannerV2PlanUpdateRequest,
     GoalPlannerV2Progress,
     GoalPlannerV2StartRequest,
     GoalPlannerV2TurnRequest,
@@ -109,5 +110,29 @@ def create_goal_router(db_provider) -> APIRouter:
         service: GoalPlannerV2Service = Depends(get_service_v2),
     ):
         return await service.list_user_plans(user_id=user_id, limit=limit)
+
+    @router.put("/v2/plans/{plan_id}", response_model=GoalPlannerV2Plan)
+    async def update_goal_plan_v2(
+        plan_id: str,
+        payload: GoalPlannerV2PlanUpdateRequest,
+        user_id: str = Query(..., min_length=1),
+        service: GoalPlannerV2Service = Depends(get_service_v2),
+    ):
+        try:
+            return await service.update_plan(user_id=user_id, plan_id=plan_id, payload=payload.model_dump(exclude_none=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.delete("/v2/plans/{plan_id}")
+    async def delete_goal_plan_v2(
+        plan_id: str,
+        user_id: str = Query(..., min_length=1),
+        service: GoalPlannerV2Service = Depends(get_service_v2),
+    ):
+        try:
+            deleted = await service.delete_plan(user_id=user_id, plan_id=plan_id)
+            return {"deleted": deleted}
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return router

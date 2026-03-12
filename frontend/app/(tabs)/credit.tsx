@@ -17,6 +17,7 @@ import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
+import { router } from 'expo-router';
 import { formatINR } from '../../lib/currency';
 
 const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
@@ -115,12 +116,20 @@ export default function Credit() {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Credit Cards</Text>
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => setShowAddModal(true)}
-        >
-          <Ionicons name="add" size={20} color="#fff" />
-        </TouchableOpacity>
+        <View style={styles.headerButtons}>
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={() => router.push('/(tabs)/profile')}
+          >
+            <Ionicons name="person-circle-outline" size={25} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.headerButton, styles.addButton]}
+            onPress={() => setShowAddModal(true)}
+          >
+            <Ionicons name="add" size={22} color="#fff" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView style={styles.scrollView}>
@@ -292,13 +301,20 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#fff',
   },
-  addButton: {
-    width: 40,
-    height: 40,
-    backgroundColor: '#4CAF50',
-    borderRadius: 20,
+  headerButtons: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  headerButton: {
+    width: 44,
+    height: 44,
+    backgroundColor: '#2a2a3e',
+    borderRadius: 22,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  addButton: {
+    backgroundColor: '#4CAF50',
   },
   scrollView: {
     flex: 1,

@@ -212,3 +212,40 @@ export const getGoalPlansV2 = async (userId: string, limit = 10): Promise<GoalPl
     throw new Error(buildMessage(error, 'Unable to load goal planner v2 plans'));
   }
 };
+
+export type GoalPlannerV2PlanUpdatePayload = {
+  goal_title?: string;
+  target_amount?: number;
+  target_months?: number;
+  recommended_monthly?: number;
+};
+
+export const updateGoalPlanV2 = async (
+  planId: string,
+  userId: string,
+  payload: GoalPlannerV2PlanUpdatePayload
+): Promise<GoalPlannerV2Plan> => {
+  requireBackendUrl();
+  try {
+    const response = await axios.put<GoalPlannerV2Plan>(
+      `${EXPO_PUBLIC_BACKEND_URL}/api/goals/v2/plans/${planId}`,
+      payload,
+      { params: { user_id: userId } }
+    );
+    return response.data;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to update goal plan'));
+  }
+};
+
+export const deleteGoalPlanV2 = async (planId: string, userId: string): Promise<boolean> => {
+  requireBackendUrl();
+  try {
+    await axios.delete(`${EXPO_PUBLIC_BACKEND_URL}/api/goals/v2/plans/${planId}`, {
+      params: { user_id: userId },
+    });
+    return true;
+  } catch (error) {
+    throw new Error(buildMessage(error, 'Unable to delete goal plan'));
+  }
+};

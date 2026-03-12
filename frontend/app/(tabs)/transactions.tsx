@@ -597,25 +597,25 @@ export default function Transactions() {
           </Text>
           {autoImporting && <Text style={styles.syncText}>Syncing SMS in background...</Text>}
         </View>
-        <View style={styles.headerButtons}>
-          {activeTab === 'transactions' && (
-            <>
-              <TouchableOpacity
-                style={styles.headerButton}
-                onPress={requestSMSPermission}
-              >
-                <Ionicons name="mail" size={20} color="#fff" />
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.headerButton, styles.addButton]}
-                onPress={() => setShowAddModal(true)}
-              >
-                <Ionicons name="add" size={20} color="#fff" />
-              </TouchableOpacity>
-            </>
-          )}
+          <View style={styles.headerButtons}>
+            {activeTab === 'transactions' && (
+              <>
+                <TouchableOpacity
+                  style={styles.headerButton}
+                  onPress={requestSMSPermission}
+                >
+                  <Ionicons name="mail" size={22} color="#fff" />
+                </TouchableOpacity>
+              </>
+            )}
+            <TouchableOpacity
+              style={styles.headerButton}
+              onPress={() => router.push('/(tabs)/profile')}
+            >
+              <Ionicons name="person-circle-outline" size={25} color="#fff" />
+            </TouchableOpacity>
+          </View>
         </View>
-      </View>
 
       <View style={styles.segmentedControl}>
         <TouchableOpacity
@@ -840,10 +840,20 @@ export default function Transactions() {
             </View>
           </View>
 
+          <View style={{ height: 96 }} />
         </ScrollView>
       ) : (
         <AnalyticsPanel variant="embedded" />
       )}
+
+      {activeTab === 'transactions' ? (
+        <TouchableOpacity
+          style={styles.fabAddButton}
+          onPress={() => setShowAddModal(true)}
+        >
+          <Ionicons name="add" size={28} color="#fff" />
+        </TouchableOpacity>
+      ) : null}
 
       <Modal
         visible={showAddModal}
@@ -1062,15 +1072,34 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   headerButton: {
-    width: 40,
-    height: 40,
-    backgroundColor: '#2a2a3e',
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
+      width: 44,
+      height: 44,
+      backgroundColor: '#2a2a3e',
+      borderRadius: 22,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
   addButton: {
     backgroundColor: '#4CAF50',
+  },
+  fabAddButton: {
+    position: 'absolute',
+    right: 24,
+    bottom: Platform.OS === 'android' ? 50 : 88,
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: '#4CAF50',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#65d06d',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.28,
+    shadowRadius: 9,
+    elevation: 9,
+    zIndex: 22,
   },
   scrollView: {
     flex: 1,

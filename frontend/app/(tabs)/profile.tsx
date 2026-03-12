@@ -120,7 +120,7 @@ export default function Profile() {
 
           <TouchableOpacity style={styles.menuItem} onPress={() => navigateTo('/profile/reminders')}>
             <View style={styles.menuItemLeft}>
-              <Ionicons name="notifications-outline" size={24} color="#4CAF50" />
+              <Ionicons name="calendar-outline" size={24} color="#4CAF50" />
               <Text style={styles.menuItemText}>Reminders</Text>
             </View>
             <View style={styles.trailingRow}>

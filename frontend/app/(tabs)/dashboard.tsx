@@ -461,8 +461,11 @@ export default function Dashboard() {
               <View style={styles.liveDot} />
               <Text style={styles.liveBadgeText}>Live Sync</Text>
             </View>
-            <TouchableOpacity style={styles.iconButton}>
-              <Ionicons name="notifications-outline" size={20} color="#fff" />
+            <TouchableOpacity
+              style={styles.iconButton}
+              onPress={() => router.push('/(tabs)/profile')}
+            >
+              <Ionicons name="person-circle-outline" size={25} color="#fff" />
             </TouchableOpacity>
           </View>
         </View>
@@ -767,12 +770,12 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   iconButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
     borderColor: '#2e4571',
     backgroundColor: 'rgba(19, 33, 60, 0.8)',
   },

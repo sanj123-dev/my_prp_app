@@ -172,6 +172,79 @@ class GoalPlannerV2Service:
             )
         return plans
 
+    async def update_plan(self, *, user_id: str, plan_id: str, payload: Dict[str, Any]) -> GoalPlannerV2Plan:
+        doc = await self.db.goal_plans_v2.find_one({"id": plan_id, "user_id": user_id})
+        if not doc:
+            raise ValueError("Goal plan not found or cannot be edited.")
+
+        plan = GoalPlannerV2Plan(**doc)
+        title = str(payload.get("goal_title", plan.goal_title)).strip() if payload.get("goal_title") is not None else plan.goal_title
+        if not title:
+            raise ValueError("Goal title cannot be empty.")
+
+        target = _f(payload.get("target_amount", plan.target_amount), plan.target_amount)
+        months = max(1, _i(payload.get("target_months", plan.target_months), plan.target_months))
+        rec = _f(payload.get("recommended_monthly", plan.recommended_monthly), plan.recommended_monthly)
+
+        if target <= 0:
+            raise ValueError("Target amount must be greater than zero.")
+        if rec < 0:
+            raise ValueError("Recommended monthly cannot be negative.")
+
+        f = dict(plan.feasibility or {})
+        current = max(0.0, _f(f.get("current_savings_inr", 0.0)))
+        safe = max(0.0, _f(f.get("safe_monthly_inr", rec)))
+        required = max(0.0, (target - current) / max(1, months))
+        recommended = rec if rec > 0 else max(required, plan.recommended_monthly, safe * 0.8)
+        projected = min(72, max(1, ceil(max(0.0, target - current) / max(1.0, recommended))))
+        affordable = current + (recommended * months)
+        gap = max(0.0, target - affordable)
+        feasible = gap <= 0 and projected <= months
+
+        f.update(
+            {
+                "target_amount_inr": round(target, 2),
+                "target_months": months,
+                "required_monthly_inr": round(required, 2),
+                "recommended_monthly_inr": round(recommended, 2),
+                "affordable_in_timeline_inr": round(affordable, 2),
+                "gap_amount_inr": round(gap, 2),
+                "projected_completion_months": projected,
+                "feasible_now": feasible,
+                "status": "affordable" if feasible else "stretch",
+            }
+        )
+
+        pseudo_goal = {"goal_text": title, "feasibility": f}
+        updated = plan.model_copy(
+            update={
+                "goal_title": title,
+                "target_amount": round(target, 2),
+                "target_months": months,
+                "estimated_monthly_required": round(required, 2),
+                "recommended_monthly": round(recommended, 2),
+                "projected_completion_months": projected,
+                "feasible_now": feasible,
+                "feasibility": f,
+                "execution_phases": self._execution(pseudo_goal),
+                "summary": self._summary(pseudo_goal),
+            }
+        )
+        await self.db.goal_plans_v2.update_one({"id": plan_id, "user_id": user_id}, {"$set": updated.model_dump()})
+        return updated
+
+    async def delete_plan(self, *, user_id: str, plan_id: str) -> bool:
+        # Delete from v2 plans first, then legacy v1 as fallback.
+        result_v2 = await self.db.goal_plans_v2.delete_one({"id": plan_id, "user_id": user_id})
+        deleted = result_v2.deleted_count > 0
+        if not deleted:
+            result_v1 = await self.db.goal_plans.delete_one({"id": plan_id, "user_id": user_id})
+            deleted = result_v1.deleted_count > 0
+        if not deleted:
+            raise ValueError("Goal plan not found.")
+        await self.db.goal_planner_sessions_v2.update_many({"user_id": user_id, "plan_id": plan_id}, {"$set": {"plan_id": None}})
+        return True
+
     async def _progress(self, s: GoalPlannerV2Session) -> GoalPlannerV2Progress:
         if s.status == "completed" and s.plan_id:
             doc = await self.db.goal_plans_v2.find_one({"id": s.plan_id, "user_id": s.user_id})

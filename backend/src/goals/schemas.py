@@ -147,6 +147,13 @@ class GoalPlannerV2TurnRequest(BaseModel):
     message: Any
 
 
+class GoalPlannerV2PlanUpdateRequest(BaseModel):
+    goal_title: Optional[str] = None
+    target_amount: Optional[float] = Field(default=None, ge=0)
+    target_months: Optional[int] = Field(default=None, ge=1, le=600)
+    recommended_monthly: Optional[float] = Field(default=None, ge=0)
+
+
 class GoalPlannerV2Progress(BaseModel):
     session_id: str
     status: Literal["collecting", "planning", "completed"]
