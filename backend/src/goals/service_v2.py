@@ -5,6 +5,7 @@ from math import ceil
 from statistics import mean
 from typing import Any, Dict, List, Optional, Tuple
 import json
+import os
 import re
 import uuid
 from urllib.parse import urlencode
@@ -13,25 +14,25 @@ from urllib.request import Request, urlopen
 from .schemas import GoalPlannerV2Panel, GoalPlannerV2Plan, GoalPlannerV2Progress, GoalPlannerV2Prompt, GoalPlannerV2Session
 
 
-PRODUCT_BENCHMARKS = [
-    {"kind": "bike", "name": "TVS Raider", "aliases": ["raider", "tvs"], "price_inr": 125000},
-    {"kind": "bike", "name": "Honda Shine", "aliases": ["shine", "honda"], "price_inr": 110000},
-    {"kind": "car", "name": "Maruti Alto K10", "aliases": ["alto"], "price_inr": 550000},
-    {"kind": "car", "name": "Maruti Baleno", "aliases": ["baleno"], "price_inr": 850000},
-    {"kind": "phone", "name": "iPhone 15", "aliases": ["iphone"], "price_inr": 80000},
-    {"kind": "phone", "name": "OnePlus Nord", "aliases": ["oneplus", "nord"], "price_inr": 32000},
-    {"kind": "laptop", "name": "Acer Aspire 5", "aliases": ["acer", "aspire"], "price_inr": 52000},
-    {"kind": "laptop", "name": "MacBook Air", "aliases": ["macbook"], "price_inr": 110000},
-]
-
 MERCADO_SITES = ["MLM", "MLA", "MCO"]
 
-TRIP_BENCHMARKS = {
-    "japan": {"budget": 9000, "standard": 13000, "premium": 22000, "flight": 55000, "visa": 2500},
-    "thailand": {"budget": 5000, "standard": 8500, "premium": 15000, "flight": 22000, "visa": 3000},
-    "dubai": {"budget": 7000, "standard": 11000, "premium": 18000, "flight": 26000, "visa": 8000},
-    "singapore": {"budget": 9000, "standard": 14000, "premium": 24000, "flight": 32000, "visa": 2500},
-}
+try:
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_openai import ChatOpenAI
+except Exception:
+    ChatPromptTemplate = None  # type: ignore[assignment]
+    ChatOpenAI = None  # type: ignore[assignment]
+
+
+def _build_llm() -> Any:
+    if ChatOpenAI is None:
+        return None
+    api_key = (os.environ.get("GROQ_API_KEY", "") or "").strip()
+    if not api_key:
+        return None
+    base_url = (os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1") or "").strip()
+    model = (os.environ.get("ASSISTANT_MODEL", "llama-3.3-70b-versatile") or "").strip()
+    return ChatOpenAI(model=model, api_key=api_key, base_url=base_url, temperature=0.2)
 
 
 def _f(v: Any, d: float = 0.0) -> float:
@@ -51,6 +52,7 @@ def _i(v: Any, d: int = 0) -> int:
 class GoalPlannerV2Service:
     def __init__(self, db: Any) -> None:
         self.db = db
+        self.llm = _build_llm()
 
     async def start(self, *, user_id: str, force_new: bool = False) -> GoalPlannerV2Progress:
         if not force_new:
@@ -75,6 +77,9 @@ class GoalPlannerV2Service:
         expected = str(s.goal_context.get("expected_prompt_key", "")).strip()
         if expected:
             s.goal_context[expected] = self._parse_input(expected, message)
+            if expected == "target_amount":
+                # Always treat target amount as an explicitly confirmed user input.
+                s.goal_context["target_amount_confirmed"] = True
         s.dialogue.append({"role": "user", "content": str(message), "ts": datetime.utcnow().isoformat()})
         s.turn_count += 1
         s.updated_at = datetime.utcnow()
@@ -184,17 +189,7 @@ class GoalPlannerV2Service:
     async def _run_agents(self, *, user_id: str, session: GoalPlannerV2Session) -> Tuple[Dict[str, Any], List[str], float]:
         g = dict(session.goal_context)
         goal = str(g.get("goal_text", "")).lower()
-        kind = "general"
-        if any(t in goal for t in ["trip", "travel", "vacation", "holiday", "japan", "thailand", "dubai", "singapore"]):
-            kind = "foreign_trip"
-        elif any(t in goal for t in ["bike", "scooter", "motorcycle"]):
-            kind = "bike"
-        elif "car" in goal:
-            kind = "car"
-        elif any(t in goal for t in ["phone", "mobile", "iphone"]):
-            kind = "phone"
-        elif any(t in goal for t in ["laptop", "macbook"]):
-            kind = "laptop"
+        kind = await self._detect_goal_kind(goal)
         g["goal_kind"] = kind
         g["destination"] = self._extract_destination(goal) if kind == "foreign_trip" else ""
 
@@ -207,6 +202,8 @@ class GoalPlannerV2Service:
             amt = self._extract_amount(goal)
             if amt > 0:
                 g["target_amount"] = amt
+                # Auto-extracted amount must still be confirmed by user once.
+                g["target_amount_confirmed"] = False
         if kind == "foreign_trip":
             if not g.get("trip_destination") and g.get("destination"):
                 g["trip_destination"] = g["destination"]
@@ -259,11 +256,23 @@ class GoalPlannerV2Service:
                     assumptions.append("User target amount overrides estimate for planning.")
                     live["assumptions"] = assumptions
                 return live
-            bench = self._bench_trip(g)
             if user_target > 0:
-                bench["market_estimate_inr"] = _f(bench.get("estimated_total_inr", 0.0))
-                bench["estimated_total_inr"] = user_target
-            return bench
+                return {
+                    "source": "user_input",
+                    "confidence": 0.65,
+                    "estimated_total_inr": round(user_target, 2),
+                    "line_items": [{"label": "User Target Amount", "amount_inr": round(user_target, 2)}],
+                    "fallback_reason": "live_api_failed_user_target_used",
+                    "assumptions": ["Live trip data unavailable, using user provided target amount."],
+                }
+            return {
+                "source": "live_api_unavailable",
+                "confidence": 0.35,
+                "estimated_total_inr": 0.0,
+                "line_items": [],
+                "fallback_reason": "live_api_failed_needs_user_target",
+                "assumptions": ["Live trip data unavailable; planner needs user target amount."],
+            }
         live = await self._live_product(goal_text or kind)
         if live.get("source") == "live_api":
             if user_target > 0:
@@ -273,18 +282,23 @@ class GoalPlannerV2Service:
                 assumptions.append("User target amount overrides estimate for planning.")
                 live["assumptions"] = assumptions
             return live
-        if kind in {"bike", "car", "phone", "laptop"}:
-            cands = [x for x in PRODUCT_BENCHMARKS if x["kind"] == kind]
-            sel = cands[0] if cands else {"name": "Estimated", "price_inr": 100000}
-            for x in cands:
-                low = goal_text.lower()
-                if x["name"].lower() in low or any(a in low for a in x["aliases"]):
-                    sel = x
-                    break
-            price = user_target or _f(sel["price_inr"], 100000.0)
-            return {"source": "benchmark", "confidence": 0.62, "estimated_total_inr": round(price, 2), "line_items": [{"label": sel["name"], "amount_inr": round(price, 2)}], "fallback_reason": "benchmark_used", "assumptions": ["Benchmark catalog used."]}
-        est = user_target or 100000.0
-        return {"source": "benchmark", "confidence": 0.45, "estimated_total_inr": round(est, 2), "line_items": [{"label": "Goal Estimate", "amount_inr": round(est, 2)}], "fallback_reason": "benchmark_used", "assumptions": ["No live estimate available."]}
+        if user_target > 0:
+            return {
+                "source": "user_input",
+                "confidence": 0.65,
+                "estimated_total_inr": round(user_target, 2),
+                "line_items": [{"label": "User Target Amount", "amount_inr": round(user_target, 2)}],
+                "fallback_reason": "live_api_failed_user_target_used",
+                "assumptions": ["Live market data unavailable, using user provided target amount."],
+            }
+        return {
+            "source": "live_api_unavailable",
+            "confidence": 0.35,
+            "estimated_total_inr": 0.0,
+            "line_items": [],
+            "fallback_reason": "live_api_failed_needs_user_target",
+            "assumptions": ["Live market data unavailable; planner needs user target amount."],
+        }
 
     def _feasibility(self, g: Dict[str, Any]) -> Dict[str, Any]:
         s = dict(g.get("financial_snapshot", {}))
@@ -308,49 +322,20 @@ class GoalPlannerV2Service:
         limit = _f(f.get("affordable_in_timeline_inr", 0.0))
         kind = str(g.get("goal_kind", "general"))
         out: List[Dict[str, Any]] = []
-        if kind in {"bike", "car", "phone", "laptop"}:
-            market_opts = list((g.get("cost_model", {}) or {}).get("market_options", []))
-            if market_opts:
-                sorted_opts = sorted(market_opts, key=lambda x: _f(x.get("amount_inr", 0.0)))
-                for opt in sorted_opts[:4]:
-                    p = _f(opt.get("amount_inr", 0.0))
-                    fit = "strong" if p <= max(limit, _f(f.get("target_amount_inr", 0.0))) else "stretch"
-                    out.append({"name": str(opt.get("label", "Market Option")), "estimated_price_inr": round(p, 2), "fit": fit})
-            else:
-                rows = sorted([x for x in PRODUCT_BENCHMARKS if x["kind"] == kind], key=lambda x: _f(x["price_inr"]))
-                for r in rows[:4]:
-                    p = _f(r["price_inr"])
-                    if bool(f.get("feasible_now", False)):
-                        fit = "on_track" if p <= max(limit, _f(f.get("target_amount_inr", 0.0))) else "upgrade"
-                    else:
-                        fit = "strong" if p <= limit else "stretch"
-                    out.append({"name": r["name"], "estimated_price_inr": round(p, 2), "fit": fit})
-        if kind == "foreign_trip":
-            d = str(g.get("trip_destination", "thailand")).lower()
-            days = max(3, _i(g.get("trip_days", 7), 7))
-            t = max(1, _i(g.get("trip_travelers", 1), 1))
-            for st in ["budget", "standard", "premium"]:
-                e = self._bench_trip({"trip_destination": d, "trip_days": days, "trip_travelers": t, "trip_style": st})
-                p = _f(e.get("estimated_total_inr", 0.0))
-                if bool(f.get("feasible_now", False)):
-                    fit = "recommended" if st in {"budget", "standard"} else "premium_option"
-                else:
-                    fit = "strong" if p <= limit else "stretch"
-                out.append({"name": f"{d.title()} ({st})", "estimated_price_inr": round(p, 2), "fit": fit})
-        if kind == "general":
+        market_opts = list((g.get("cost_model", {}) or {}).get("market_options", []))
+        if market_opts:
+            sorted_opts = sorted(market_opts, key=lambda x: _f(x.get("amount_inr", 0.0)))
+            for opt in sorted_opts[:4]:
+                p = _f(opt.get("amount_inr", 0.0))
+                fit = "strong" if p <= max(limit, _f(f.get("target_amount_inr", 0.0))) else "stretch"
+                out.append({"name": str(opt.get("label", "Market Option")), "estimated_price_inr": round(p, 2), "fit": fit})
+        if not out:
+            target = round(_f(f.get("target_amount_inr", 0.0)), 2)
             out.extend(
                 [
-                    {"name": "Core plan", "estimated_price_inr": round(_f(f.get("target_amount_inr", 0.0)), 2), "fit": "recommended"},
-                    {
-                        "name": "Fast-track plan (+15% monthly savings)",
-                        "estimated_price_inr": round(_f(f.get("target_amount_inr", 0.0)), 2),
-                        "fit": "faster",
-                    },
-                    {
-                        "name": "Comfort plan (+20% timeline)",
-                        "estimated_price_inr": round(_f(f.get("target_amount_inr", 0.0)), 2),
-                        "fit": "easier",
-                    },
+                    {"name": "Current target plan", "estimated_price_inr": target, "fit": "recommended"},
+                    {"name": "Faster plan (+15% monthly contribution)", "estimated_price_inr": target, "fit": "faster"},
+                    {"name": "Comfort plan (+20% timeline)", "estimated_price_inr": target, "fit": "easier"},
                 ]
             )
         return out[:4]
@@ -361,6 +346,8 @@ class GoalPlannerV2Service:
         if not g.get("goal_text"):
             m.append("goal_text")
         if not g.get("target_amount"):
+            m.append("target_amount")
+        elif not bool(g.get("target_amount_confirmed", False)):
             m.append("target_amount")
         if not g.get("target_months"):
             m.append("target_months")
@@ -381,7 +368,7 @@ class GoalPlannerV2Service:
 
     def _confidence(self, g: Dict[str, Any], missing: List[str]) -> float:
         kind = str(g.get("goal_kind", "general"))
-        fields = ["goal_text", "target_months", "current_savings", "monthly_commitment"] + (["trip_destination", "trip_days", "trip_travelers", "trip_style"] if kind == "foreign_trip" else ["goal_model"] if kind in {"bike", "car", "phone", "laptop"} else [])
+        fields = ["goal_text", "target_amount", "target_months", "current_savings", "monthly_commitment"] + (["trip_destination", "trip_days", "trip_travelers", "trip_style"] if kind == "foreign_trip" else [])
         ok = sum(1 for k in fields if g.get(k) not in [None, "", 0] or (k == "current_savings" and g.get(k) == 0))
         ratio = ok / max(1, len(fields))
         cm = _f((g.get("cost_model", {}) or {}).get("confidence", 0.0))
@@ -391,19 +378,37 @@ class GoalPlannerV2Service:
         g = dict(s.goal_context)
         m = self._missing(g)
         key = m[0] if m else "goal_text"
+        kind = str(g.get("goal_kind", "general"))
         p = {
-            "goal_text": GoalPlannerV2Prompt(key="goal_text", prompt="What goal do you want to plan?", input_type="text", required=True),
-            "target_amount": GoalPlannerV2Prompt(key="target_amount", prompt="What is your target amount for this goal? (INR)", input_type="number", required=True, placeholder="Example: 150000"),
-            "target_months": GoalPlannerV2Prompt(key="target_months", prompt="In how many months do you want to complete this goal?", input_type="number", required=True, placeholder="Example: 12"),
-            "current_savings": GoalPlannerV2Prompt(key="current_savings", prompt="How much have you already saved for this goal?", input_type="number", required=True, placeholder="Example: 20000"),
-            "monthly_commitment": GoalPlannerV2Prompt(key="monthly_commitment", prompt="How much can you save monthly for this goal?", input_type="number", required=True, placeholder="Example: 12000"),
-            "goal_model": GoalPlannerV2Prompt(key="goal_model", prompt="Any specific model in mind?", input_type="text", required=False, placeholder="Example: iPhone 15"),
-            "trip_destination": GoalPlannerV2Prompt(key="trip_destination", prompt="Which country is this trip for?", input_type="text", required=True, placeholder="Example: Japan"),
-            "trip_days": GoalPlannerV2Prompt(key="trip_days", prompt="How many days for this trip?", input_type="number", required=True),
-            "trip_travelers": GoalPlannerV2Prompt(key="trip_travelers", prompt="How many travelers?", input_type="number", required=True),
-            "trip_style": GoalPlannerV2Prompt(key="trip_style", prompt="Preferred trip style?", input_type="choice", choices=["budget", "standard", "premium"], required=True),
+            "goal_text": GoalPlannerV2Prompt(key="goal_text", prompt="Tell me the goal you want to achieve so I can build your plan.", input_type="text", required=True),
+            "target_amount": GoalPlannerV2Prompt(
+                key="target_amount",
+                prompt="What is your target amount (INR) for this goal? I use this as the final planning amount.",
+                input_type="number",
+                required=True,
+                placeholder="Example: 150000",
+            ),
+            "target_months": GoalPlannerV2Prompt(key="target_months", prompt="By when do you want to achieve this? (in months)", input_type="number", required=True, placeholder="Example: 12"),
+            "current_savings": GoalPlannerV2Prompt(key="current_savings", prompt="How much is already saved toward this goal?", input_type="number", required=True, placeholder="Example: 20000"),
+            "monthly_commitment": GoalPlannerV2Prompt(key="monthly_commitment", prompt="How much can you commit monthly without stress?", input_type="number", required=True, placeholder="Example: 12000"),
+            "goal_model": GoalPlannerV2Prompt(key="goal_model", prompt="Any model/variant preference? (optional)", input_type="text", required=False, placeholder="Example: iPhone 15"),
+            "trip_destination": GoalPlannerV2Prompt(key="trip_destination", prompt="Which destination is this trip for?", input_type="text", required=True, placeholder="Example: Japan"),
+            "trip_days": GoalPlannerV2Prompt(key="trip_days", prompt="How many days are you planning for this trip?", input_type="number", required=True),
+            "trip_travelers": GoalPlannerV2Prompt(key="trip_travelers", prompt="How many travelers are included?", input_type="number", required=True),
+            "trip_style": GoalPlannerV2Prompt(key="trip_style", prompt="What travel style do you prefer?", input_type="choice", choices=["budget", "standard", "premium"], required=True),
         }
-        return p.get(key, p["goal_text"])
+        selected = p.get(key, p["goal_text"])
+        if kind == "foreign_trip" and key in {"target_amount", "target_months", "current_savings", "monthly_commitment"}:
+            return GoalPlannerV2Prompt(
+                key=selected.key,
+                prompt=f"For your trip plan: {selected.prompt}",
+                input_type=selected.input_type,
+                required=selected.required,
+                choices=selected.choices,
+                placeholder=selected.placeholder,
+                help_text=selected.help_text,
+            )
+        return selected
 
     async def _build_plan(self, *, user_id: str, session: GoalPlannerV2Session) -> GoalPlannerV2Plan:
         g = dict(session.goal_context)
@@ -468,7 +473,7 @@ class GoalPlannerV2Service:
                 {"label": "Spend / month", "value": f"\u20B9{_f(snap.get('monthly_spend_estimate', 0.0)):,.0f}"},
                 {"label": "Safe goal budget", "value": f"\u20B9{_f(snap.get('safe_monthly_goal_budget', 0.0)):,.0f}"},
             ]),
-            GoalPlannerV2Panel(id="goal_cost", title="Goal Cost & Assumptions", summary=f"Source: {str(cost.get('source', 'benchmark'))}", items=[
+            GoalPlannerV2Panel(id="goal_cost", title="Goal Cost & Assumptions", summary=f"Source: {str(cost.get('source', 'live'))}", items=[
                 {"label": "Estimated total", "value": f"\u20B9{_f(cost.get('estimated_total_inr', 0.0)):,.0f}"}
             ] + [{"label": str(r.get("label", "Cost")), "value": f"\u20B9{_f(r.get('amount_inr', 0.0)):,.0f}"} for r in list(cost.get("line_items", []))[:6]]),
             GoalPlannerV2Panel(id="affordability", title="Affordability Verdict", summary=str(f.get("status", "unknown")).capitalize(), items=[
@@ -522,51 +527,62 @@ class GoalPlannerV2Service:
                 "assumptions": ["Live marketplace results converted to INR median estimate."],
             }
         except Exception:
-            return {"source": "benchmark", "confidence": 0.45, "estimated_total_inr": 0.0, "line_items": [], "fallback_reason": "live_api_failed", "assumptions": ["Live API failed, benchmark fallback used."]}
+            return {"source": "live_api_unavailable", "confidence": 0.35, "estimated_total_inr": 0.0, "line_items": [], "fallback_reason": "live_api_failed", "assumptions": ["Live API failed; user target amount is required."]}
 
     async def _live_trip(self, g: Dict[str, Any]) -> Dict[str, Any]:
+        destination = str(g.get("trip_destination", "")).strip()
+        days = max(1, _i(g.get("trip_days", 0), 0))
+        travelers = max(1, _i(g.get("trip_travelers", 1), 1))
+        style = str(g.get("trip_style", "standard")).strip().lower()
         try:
             cfg = await self.db.settings.find_one({"key": "goal_trip_cost_api"})
             url = str((cfg or {}).get("value", "")).strip()
             if not url:
                 raise ValueError("not configured")
             payload = self._http_get_json(url, {
-                "destination": str(g.get("trip_destination", "")),
-                "days": max(3, _i(g.get("trip_days", 7), 7)),
-                "travelers": max(1, _i(g.get("trip_travelers", 1), 1)),
-                "style": str(g.get("trip_style", "standard")),
+                "destination": destination,
+                "days": max(1, days),
+                "travelers": travelers,
+                "style": style,
             }, timeout=5, retries=2)
             total = _f(payload.get("estimated_total_inr", 0.0))
             if total <= 0:
                 raise ValueError("invalid")
-            return {"source": "live_api", "confidence": max(0.4, min(0.9, _f(payload.get("confidence", 0.65)))), "estimated_total_inr": round(total, 2), "line_items": list(payload.get("line_items", [])), "fallback_reason": "", "assumptions": ["Live trip API used."]}
-        except Exception as exc:
-            reason = "live_api_not_configured" if "configured" in str(exc).lower() else "live_api_timeout"
-            return {"source": "benchmark", "confidence": 0.45, "estimated_total_inr": 0.0, "line_items": [], "fallback_reason": reason, "assumptions": ["Live trip API unavailable."]}
-
-    def _bench_trip(self, g: Dict[str, Any]) -> Dict[str, Any]:
-        d = str(g.get("trip_destination", "thailand")).lower()
-        days = max(3, _i(g.get("trip_days", 7), 7))
-        t = max(1, _i(g.get("trip_travelers", 1), 1))
-        st = str(g.get("trip_style", "standard")).lower()
-        p = TRIP_BENCHMARKS.get(d, TRIP_BENCHMARKS["thailand"])
-        day = _f(p.get(st, p["standard"]))
-        flight = _f(p.get("flight", 30000.0))
-        visa = _f(p.get("visa", 4000.0))
-        stay = day * days * t
-        flights = flight * t
-        local = max(3000.0, stay * 0.08)
-        ins = max(2500.0, stay * 0.05)
-        cont = max(5000.0, (stay + flights) * 0.08)
-        total = stay + flights + local + ins + cont + visa
-        return {"source": "benchmark", "confidence": 0.64, "estimated_total_inr": round(total, 2), "line_items": [
-            {"label": "Flights", "amount_inr": round(flights, 2)},
-            {"label": "Stay + Daily Spend", "amount_inr": round(stay, 2)},
-            {"label": "Visa", "amount_inr": round(visa, 2)},
-            {"label": "Local Transport", "amount_inr": round(local, 2)},
-            {"label": "Travel Insurance", "amount_inr": round(ins, 2)},
-            {"label": "Contingency Buffer", "amount_inr": round(cont, 2)},
-        ], "fallback_reason": "benchmark_used", "assumptions": [f"Benchmark used for {d} ({st})."]}
+            return {
+                "source": "live_api",
+                "confidence": max(0.4, min(0.9, _f(payload.get("confidence", 0.65)))),
+                "estimated_total_inr": round(total, 2),
+                "line_items": list(payload.get("line_items", [])),
+                "market_options": list(payload.get("line_items", [])),
+                "fallback_reason": "",
+                "assumptions": ["Live trip API used."],
+            }
+        except Exception:
+            # Dynamic fallback: derive live options from marketplace queries for flights/hotels/packages.
+            query = f"{destination} trip package {style}".strip() or "international trip package"
+            options = await self._live_market_options(query)
+            if options:
+                mult = max(1, travelers) * max(1, days / 5.0)
+                scaled = [{"label": str(x.get("label", "Trip Option")), "amount_inr": round(_f(x.get("amount_inr", 0.0)) * mult, 2)} for x in options]
+                scaled = sorted(scaled, key=lambda x: _f(x.get("amount_inr", 0.0)))
+                midpoint = scaled[max(0, len(scaled) // 2)]
+                return {
+                    "source": "live_api",
+                    "confidence": 0.58,
+                    "estimated_total_inr": round(_f(midpoint.get("amount_inr", 0.0)), 2),
+                    "line_items": scaled[:6],
+                    "market_options": scaled[:6],
+                    "fallback_reason": "trip_api_unavailable_market_derived",
+                    "assumptions": ["Trip API unavailable, estimate derived from live market listings."],
+                }
+            return {
+                "source": "live_api_unavailable",
+                "confidence": 0.35,
+                "estimated_total_inr": 0.0,
+                "line_items": [],
+                "fallback_reason": "live_api_failed_needs_user_target",
+                "assumptions": ["Live trip data unavailable; user target is required."],
+            }
 
     async def _usd_inr(self) -> float:
         try:
@@ -576,7 +592,38 @@ class GoalPlannerV2Service:
                 return r
         except Exception:
             pass
-        return 83.0
+        return 0.0
+
+    async def _detect_goal_kind(self, goal_text: str) -> str:
+        text = (goal_text or "").strip().lower()
+        if not text:
+            return "general"
+        if self.llm is not None and ChatPromptTemplate is not None:
+            try:
+                prompt = ChatPromptTemplate.from_messages(
+                    [
+                        ("system", "Classify user financial goal into one token only: foreign_trip, product_purchase, emergency_fund, investment, debt_repayment, education, housing, general."),
+                        ("human", "{goal_text}"),
+                    ]
+                )
+                # sync call style to keep method non-async
+                response = await (prompt | self.llm).ainvoke({"goal_text": text})
+                token = str(getattr(response, "content", "")).strip().lower()
+                if token in {"foreign_trip", "product_purchase", "emergency_fund", "investment", "debt_repayment", "education", "housing", "general"}:
+                    return token
+            except Exception:
+                pass
+        if any(t in text for t in ["trip", "travel", "vacation", "holiday", "visa", "flight", "hotel"]):
+            return "foreign_trip"
+        if any(t in text for t in ["buy", "purchase", "phone", "laptop", "car", "bike", "watch", "tv"]):
+            return "product_purchase"
+        if any(t in text for t in ["emergency", "corpus"]):
+            return "emergency_fund"
+        if any(t in text for t in ["loan", "debt", "emi", "repay"]):
+            return "debt_repayment"
+        if any(t in text for t in ["invest", "mf", "sip", "stock"]):
+            return "investment"
+        return "general"
 
     def _parse_input(self, key: str, value: Any) -> Any:
         if key in {"target_months", "trip_days", "trip_travelers"}:
@@ -621,11 +668,17 @@ class GoalPlannerV2Service:
         return max(1, _i(m.group(1), 0)) if m else 0
 
     def _extract_destination(self, text: str) -> str:
-        for d in TRIP_BENCHMARKS.keys():
-            if d in text:
-                return d
-        m = re.search(r"to\s+([a-zA-Z]+)", text)
-        return str(m.group(1)).lower() if m else ""
+        # Generic extraction without hardcoded location list.
+        m = re.search(r"\bto\s+([a-zA-Z][a-zA-Z\s]{1,40})", text)
+        if m:
+            raw = str(m.group(1)).strip().lower()
+            return re.sub(r"[^a-z\s]", "", raw).strip()
+        # fallback: first named phrase after common trip words
+        m2 = re.search(r"\b(?:trip|travel|vacation|holiday)\s+(?:to\s+)?([a-zA-Z][a-zA-Z\s]{1,40})", text)
+        if m2:
+            raw = str(m2.group(1)).strip().lower()
+            return re.sub(r"[^a-z\s]", "", raw).strip()
+        return ""
 
     def _dt(self, v: Any) -> datetime:
         if isinstance(v, datetime):
@@ -694,7 +747,8 @@ class GoalPlannerV2Service:
         if cur == "INR":
             return amount
         if cur == "USD":
-            return amount * (await self._usd_inr())
+            rate = await self._usd_inr()
+            return amount * rate if rate > 0 else 0.0
         try:
             data = self._http_get_json(
                 "https://api.frankfurter.app/latest",
@@ -707,9 +761,7 @@ class GoalPlannerV2Service:
                 return amount * rate
         except Exception:
             pass
-        # coarse fallback map for unsupported currencies
-        coarse = {"MXN": 4.9, "ARS": 0.08, "COP": 0.02, "EUR": 90.0, "GBP": 105.0}
-        return amount * _f(coarse.get(cur, 0.0), 0.0)
+        return 0.0
 
 
 async def init_goal_module_v2(db: Any) -> None:
