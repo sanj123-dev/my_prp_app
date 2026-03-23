@@ -17,6 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as DocumentPicker from 'expo-document-picker';
 import {
   addDays,
   endOfMonth,
@@ -86,6 +87,14 @@ type SimilarPreview = {
   sample_descriptions?: string[];
 };
 
+type StatementImportResponse = {
+  imported_count: number;
+  skipped_count: number;
+  failed_count: number;
+  transactions: Transaction[];
+  notes?: string[];
+};
+
 type MonthOption = {
   key: string;
   label: string;
@@ -108,6 +117,8 @@ export default function Transactions() {
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
   const [processing, setProcessing] = useState(false);
+  const [statementProcessing, setStatementProcessing] = useState(false);
+  const [statementStatus, setStatementStatus] = useState('');
   const [smsText, setSmsText] = useState('');
   const [smsProcessing, setSmsProcessing] = useState(false);
   const [activeTab, setActiveTab] = useState<'transactions' | 'analytics'>(
@@ -411,6 +422,114 @@ export default function Transactions() {
       Alert.alert('Error', 'Failed to import SMS transactions.');
     } finally {
       setSmsProcessing(false);
+    }
+  };
+
+  const detectImageOcrText = async (uri: string) => {
+    if (Platform.OS !== 'android') {
+      return '';
+    }
+
+    try {
+      setStatementStatus('Running OCR...');
+      const mlkitModule = await import('react-native-mlkit-ocr');
+      const detector = (mlkitModule as any)?.default ?? (mlkitModule as any);
+      const ocrFn = detector?.detectFromUri ?? detector?.detectFromFile;
+      if (typeof ocrFn !== 'function') {
+        return '';
+      }
+      const result = await ocrFn(uri);
+      if (typeof result?.text === 'string' && result.text.trim()) {
+        return result.text.trim();
+      }
+      if (Array.isArray(result)) {
+        return result
+          .map((item) => String(item?.text || '').trim())
+          .filter(Boolean)
+          .join('\n');
+      }
+      if (Array.isArray(result?.blocks)) {
+        return result.blocks
+          .map((item: { text?: string }) => String(item?.text || '').trim())
+          .filter(Boolean)
+          .join('\n');
+      }
+      return '';
+    } catch (error) {
+      console.warn('Image OCR failed:', getAxiosErrorDetails(error));
+      return '';
+    }
+  };
+
+  const importStatementFile = async () => {
+    try {
+      if (!userId) {
+        Alert.alert('Error', 'Please wait for profile sync and try again.');
+        return;
+      }
+      const selected = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+        type: [
+          'application/pdf',
+          'text/csv',
+          'application/vnd.ms-excel',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'image/*',
+        ],
+      });
+
+      if (selected.canceled || selected.assets.length === 0) {
+        return;
+      }
+
+      const asset = selected.assets[0];
+      if (!asset.uri || !asset.name) {
+        Alert.alert('Error', 'Invalid file selected.');
+        return;
+      }
+
+      setStatementProcessing(true);
+      setStatementStatus('Reading file...');
+
+      const mimeType = asset.mimeType || '';
+      const isImage = mimeType.startsWith('image/');
+      const ocrText = isImage ? await detectImageOcrText(asset.uri) : '';
+
+      const formData = new FormData();
+      formData.append('user_id', userId);
+      if (ocrText.trim()) {
+        formData.append('extracted_text', ocrText.trim());
+      }
+      formData.append('file', {
+        uri: asset.uri,
+        name: asset.name,
+        type: asset.mimeType || 'application/octet-stream',
+      } as any);
+
+      setStatementStatus('Importing transactions...');
+      const response = await axios.post<StatementImportResponse>(
+        `${EXPO_PUBLIC_BACKEND_URL}/api/transactions/statements/upload`,
+        formData,
+        {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        }
+      );
+
+      const imported = response.data.transactions || [];
+      mergeTransactions(imported);
+      setShowAddModal(false);
+      const noteText = (response.data.notes || []).slice(0, 2).join('\n');
+      Alert.alert(
+        'Statement Imported',
+        `Added ${response.data.imported_count} transaction(s). Skipped ${response.data.skipped_count}, failed ${response.data.failed_count}.${noteText ? `\n\n${noteText}` : ''}`
+      );
+    } catch (error) {
+      console.error('Error importing statement:', getAxiosErrorDetails(error));
+      Alert.alert('Error', 'Failed to import statement file.');
+    } finally {
+      setStatementStatus('');
+      setStatementProcessing(false);
     }
   };
 
@@ -901,7 +1020,7 @@ export default function Transactions() {
             <TouchableOpacity
               style={styles.addButton}
               onPress={addManualTransaction}
-              disabled={processing}
+              disabled={processing || statementProcessing}
             >
               {processing ? (
                 <ActivityIndicator color="#fff" />
@@ -909,6 +1028,22 @@ export default function Transactions() {
                 <Text style={styles.addButtonText}>Add Transaction</Text>
               )}
             </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.addButton, styles.uploadStatementButton]}
+              onPress={importStatementFile}
+              disabled={processing || statementProcessing}
+            >
+              {statementProcessing ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.addButtonText}>Upload Statement (PDF/Excel/Image)</Text>
+              )}
+            </TouchableOpacity>
+
+            {statementStatus ? (
+              <Text style={styles.statementStatusText}>{statementStatus}</Text>
+            ) : null}
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -1081,6 +1216,16 @@ const styles = StyleSheet.create({
     },
   addButton: {
     backgroundColor: '#4CAF50',
+    borderRadius: 12,
+    marginTop: 12,
+  },
+  uploadStatementButton: {
+    backgroundColor: '#3b82f6',
+  },
+  statementStatusText: {
+    color: '#9fb4ff',
+    fontSize: 12,
+    marginTop: 10,
   },
   fabAddButton: {
     position: 'absolute',

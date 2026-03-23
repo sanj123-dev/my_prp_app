@@ -75,3 +75,11 @@ class CategoryRetrainResponse(BaseModel):
     user_id: str
     scanned_transactions: int
     rules_upserted: int
+
+
+class StatementImportResponse(BaseModel):
+    imported_count: int
+    skipped_count: int
+    failed_count: int
+    transactions: List[Transaction] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)

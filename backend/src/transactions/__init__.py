@@ -24,6 +24,7 @@ from .service import (
 from .schemas import (
     CategoryRetrainResponse,
     SMSTransactionRequest,
+    StatementImportResponse,
     Transaction,
     TransactionAmountUpdate,
     TransactionCategoryUpdate,

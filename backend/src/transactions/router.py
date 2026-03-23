@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Tuple
 from collections import Counter
 import re
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from .schemas import (
     CategoryRetrainResponse,
     SMSTransactionRequest,
+    StatementImportResponse,
     Transaction,
     TransactionAmountUpdate,
     TransactionCategoryUpdate,
@@ -51,6 +53,237 @@ def _transaction_datetime(item: Dict[str, Any]) -> datetime:
         except Exception:
             return datetime.utcnow()
     return datetime.utcnow()
+
+
+def _looks_like_amount(value: str) -> bool:
+    return bool(re.search(r"[0-9]", value or ""))
+
+
+def _to_amount(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    cleaned = raw.replace(",", "")
+    cleaned = re.sub(r"(?i)\b(?:rs|inr)\.?\s*", "", cleaned).strip()
+    cleaned = re.sub(r"[^0-9.\-]", "", cleaned)
+    if cleaned in {"", "-", ".", "-."}:
+        return None
+    try:
+        return abs(float(cleaned))
+    except Exception:
+        return None
+
+
+def _to_statement_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    raw = str(value).strip()
+    if not raw:
+        return None
+    for fmt in (
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%d-%m-%y",
+        "%d/%m/%y",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d %b %Y",
+        "%d %B %Y",
+    ):
+        try:
+            return datetime.strptime(raw, fmt)
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _normalize_column_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (value or "").strip().lower())
+
+
+def _extract_rows_from_excel_or_csv(
+    filename: str,
+    content_type: str,
+    raw_bytes: bytes,
+) -> List[Dict[str, Any]]:
+    try:
+        import pandas as pd  # type: ignore
+    except Exception as error:
+        raise HTTPException(status_code=500, detail="Excel/CSV support is not installed on backend") from error
+
+    suffix = (filename.rsplit(".", 1)[-1].lower() if "." in filename else "")
+    data = BytesIO(raw_bytes)
+    if "csv" in (content_type or "").lower() or suffix == "csv":
+        frame = pd.read_csv(data)
+    else:
+        frame = pd.read_excel(data, engine="openpyxl")
+    frame = frame.fillna("")
+    return frame.to_dict(orient="records")
+
+
+def _extract_text_from_pdf(raw_bytes: bytes) -> str:
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except Exception as error:
+        raise HTTPException(status_code=500, detail="PDF parsing support is not installed on backend") from error
+
+    reader = PdfReader(BytesIO(raw_bytes))
+    chunks: List[str] = []
+    for page in reader.pages:
+        page_text = page.extract_text() or ""
+        if page_text.strip():
+            chunks.append(page_text)
+    return "\n".join(chunks).strip()
+
+
+def _rows_to_candidates(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    candidates: List[Dict[str, Any]] = []
+    notes: List[str] = []
+    for row in rows:
+        normalized = {_normalize_column_name(str(key)): value for key, value in row.items()}
+
+        date_value = None
+        for key in ("date", "txndate", "transactiondate", "valuedate", "posteddate"):
+            if key in normalized and str(normalized[key]).strip():
+                date_value = normalized[key]
+                break
+
+        description = ""
+        for key in ("description", "narration", "remarks", "details", "merchant", "particulars"):
+            if key in normalized and str(normalized[key]).strip():
+                description = str(normalized[key]).strip()
+                break
+
+        debit_amount = None
+        for key in ("debit", "withdrawal", "withdraw", "debitamount", "dr"):
+            if key in normalized and _looks_like_amount(str(normalized[key])):
+                debit_amount = _to_amount(normalized[key])
+                if debit_amount:
+                    break
+
+        credit_amount = None
+        for key in ("credit", "deposit", "creditamount", "cr"):
+            if key in normalized and _looks_like_amount(str(normalized[key])):
+                credit_amount = _to_amount(normalized[key])
+                if credit_amount:
+                    break
+
+        direct_amount = None
+        direct_amount_raw = ""
+        for key in ("amount", "txnamount", "transactionamount"):
+            if key in normalized and _looks_like_amount(str(normalized[key])):
+                direct_amount_raw = str(normalized[key]).strip()
+                direct_amount = _to_amount(normalized[key])
+                if direct_amount:
+                    break
+
+        transaction_type = "debit"
+        amount = debit_amount or credit_amount or direct_amount
+        if amount is None:
+            continue
+        if credit_amount and not debit_amount:
+            transaction_type = "credit"
+        elif debit_amount and not credit_amount:
+            transaction_type = "debit"
+        else:
+            raw_direct = direct_amount_raw
+            if raw_direct.startswith("-"):
+                transaction_type = "debit"
+            elif raw_direct:
+                transaction_type = "credit" if "credit" in description.lower() else "debit"
+
+        parsed_date = _to_statement_datetime(date_value) or datetime.utcnow()
+        if not description:
+            description = "Imported from statement"
+
+        candidates.append(
+            {
+                "amount": amount,
+                "description": description[:220],
+                "date": parsed_date,
+                "transaction_type": transaction_type,
+            }
+        )
+
+    if not candidates:
+        notes.append("No valid transaction rows found in table-style statement.")
+    return candidates, notes
+
+
+def _extract_line_candidates(text: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    if not text.strip():
+        return candidates
+    date_pattern = r"(?P<date>\d{1,2}[-/]\d{1,2}[-/]\d{2,4})"
+    amount_pattern = r"(?P<amount>-?[0-9][0-9,]*(?:\.[0-9]{1,2})?)"
+    crdr_pattern = r"(?P<crdr>cr|dr|credit|debit)?"
+    pattern = re.compile(
+        rf"{date_pattern}\s+(?P<description>.+?)\s+{amount_pattern}\s*{crdr_pattern}\s*$",
+        flags=re.IGNORECASE,
+    )
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if len(line) < 8:
+            continue
+        match = pattern.search(line)
+        if not match:
+            continue
+        amount = _to_amount(match.group("amount"))
+        if amount is None or amount <= 0:
+            continue
+        parsed_date = _to_statement_datetime(match.group("date")) or datetime.utcnow()
+        crdr = (match.group("crdr") or "").strip().lower()
+        transaction_type = "credit" if crdr in {"cr", "credit"} else "debit"
+        candidates.append(
+            {
+                "amount": amount,
+                "description": (match.group("description") or "Imported from statement").strip()[:220],
+                "date": parsed_date,
+                "transaction_type": transaction_type,
+            }
+        )
+    return candidates
+
+
+async def _extract_candidates_from_text_with_ai(text: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    if not text.strip():
+        return candidates
+    amount_hint_regex = re.compile(r"(?:rs\.?|inr|₹|\$)\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?", re.IGNORECASE)
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+    candidate_lines = [line for line in lines if amount_hint_regex.search(line)]
+    for line in candidate_lines[:80]:
+        try:
+            ai_fields = await _extract_sms_fields_with_ai(line)
+            if not bool(ai_fields.get("is_transaction")):
+                continue
+            amount = ai_fields.get("amount")
+            if amount is None:
+                continue
+            normalized_amount = _to_amount(amount)
+            if normalized_amount is None or normalized_amount <= 0:
+                continue
+            description = str(ai_fields.get("merchant_name") or line).strip()[:220]
+            transaction_datetime = ai_fields.get("transaction_datetime") or datetime.utcnow()
+            transaction_type = ai_fields.get("transaction_type") or infer_transaction_type(line)
+            candidates.append(
+                {
+                    "amount": normalized_amount,
+                    "description": description,
+                    "date": transaction_datetime if isinstance(transaction_datetime, datetime) else datetime.utcnow(),
+                    "transaction_type": normalize_transaction_type(transaction_type),
+                }
+            )
+        except Exception:
+            continue
+    return candidates
 
 
 def create_transactions_router(db_provider) -> APIRouter:
@@ -209,6 +442,159 @@ def create_transactions_router(db_provider) -> APIRouter:
         except Exception as error:
             logging.exception("SMS transaction import failed for user %s: %s", request.user_id, error)
             raise HTTPException(status_code=422, detail="Unable to process this SMS safely")
+
+    @router.post("/transactions/statements/upload", response_model=StatementImportResponse)
+    async def upload_statement_transactions(
+        user_id: str = Form(...),
+        file: UploadFile = File(...),
+        extracted_text: Optional[str] = Form(None),
+    ):
+        try:
+            if not user_id.strip():
+                raise HTTPException(status_code=400, detail="user_id is required")
+            raw_bytes = await file.read()
+            if not raw_bytes:
+                raise HTTPException(status_code=400, detail="Uploaded file is empty")
+            if len(raw_bytes) > 15 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="File is too large. Maximum size is 15MB.")
+
+            filename = file.filename or "statement"
+            content_type = (file.content_type or "").lower()
+            suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+            candidates: List[Dict[str, Any]] = []
+            notes: List[str] = []
+
+            if suffix in {"csv", "xlsx", "xls"} or "spreadsheet" in content_type or "csv" in content_type:
+                rows = _extract_rows_from_excel_or_csv(filename, content_type, raw_bytes)
+                row_candidates, row_notes = _rows_to_candidates(rows)
+                candidates.extend(row_candidates)
+                notes.extend(row_notes)
+            elif suffix == "pdf" or "pdf" in content_type:
+                raw_text = _extract_text_from_pdf(raw_bytes)
+                line_candidates = _extract_line_candidates(raw_text)
+                if line_candidates:
+                    candidates.extend(line_candidates)
+                else:
+                    ai_candidates = await _extract_candidates_from_text_with_ai(raw_text)
+                    candidates.extend(ai_candidates)
+                    if not ai_candidates:
+                        notes.append("PDF text was read but transaction rows could not be identified.")
+            elif content_type.startswith("image/") or suffix in {"jpg", "jpeg", "png", "webp"}:
+                text_from_image = (extracted_text or "").strip()
+                if not text_from_image:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="No OCR text found for image. Please allow OCR in app and try again.",
+                    )
+                line_candidates = _extract_line_candidates(text_from_image)
+                if line_candidates:
+                    candidates.extend(line_candidates)
+                else:
+                    ai_candidates = await _extract_candidates_from_text_with_ai(text_from_image)
+                    candidates.extend(ai_candidates)
+                    if not ai_candidates:
+                        notes.append("OCR text was received but no transactions matched parser patterns.")
+            else:
+                raise HTTPException(
+                    status_code=415,
+                    detail="Unsupported file type. Please upload PDF, Excel/CSV, or image.",
+                )
+
+            if not candidates:
+                raise HTTPException(status_code=422, detail="No transactions could be extracted from this statement")
+
+            imported: List[Transaction] = []
+            skipped_count = 0
+            failed_count = 0
+            for candidate in candidates[:200]:
+                try:
+                    amount = float(candidate.get("amount", 0) or 0)
+                    if amount <= 0:
+                        skipped_count += 1
+                        continue
+                    description = str(candidate.get("description", "")).strip()[:220]
+                    if not description:
+                        skipped_count += 1
+                        continue
+                    transaction_date = candidate.get("date")
+                    if not isinstance(transaction_date, datetime):
+                        transaction_date = _to_statement_datetime(transaction_date) or datetime.utcnow()
+                    raw_type = str(candidate.get("transaction_type", "debit")).strip().lower()
+                    transaction_type = normalize_transaction_type(raw_type) if raw_type else infer_transaction_type(description)
+
+                    existing = await db.transactions.find_one(
+                        {
+                            "user_id": user_id,
+                            "source": "statement_upload",
+                            "amount": amount,
+                            "description": description,
+                            "date": transaction_date,
+                        }
+                    )
+                    if existing:
+                        skipped_count += 1
+                        continue
+
+                    merchant_key = _extract_merchant_key(description)
+                    upi_id = _extract_upi_id(description)
+                    learned_category = await _learned_category_for_transaction(
+                        user_id,
+                        merchant_key=merchant_key,
+                        upi_id=upi_id,
+                        description=description,
+                    )
+                    ai_result = (
+                        {"category": learned_category, "sentiment": "neutral"}
+                        if learned_category
+                        else await categorize_transaction_with_ai(description, amount)
+                    )
+
+                    trans_obj = Transaction(
+                        user_id=user_id,
+                        amount=amount,
+                        category=ai_result["category"],
+                        description=description,
+                        date=transaction_date,
+                        source="statement_upload",
+                        transaction_type=transaction_type,
+                        sentiment=ai_result.get("sentiment", "neutral"),
+                        merchant_key=merchant_key,
+                        merchant_name=_extract_merchant_name(description),
+                        bank_name=_extract_bank_name(description),
+                        account_mask=_extract_account_mask(description),
+                        upi_id=upi_id,
+                    )
+                    await db.transactions.insert_one(trans_obj.dict())
+                    imported.append(trans_obj)
+
+                    if trans_obj.category != "Other" and (merchant_key or upi_id):
+                        await _save_category_rule(
+                            user_id=user_id,
+                            category=trans_obj.category,
+                            merchant_key=merchant_key,
+                            upi_id=upi_id,
+                            strength_increment=1,
+                        )
+                except Exception as item_error:
+                    failed_count += 1
+                    logging.warning("Statement row import failed for user %s: %s", user_id, item_error)
+
+            if not imported and (skipped_count > 0 or failed_count > 0):
+                raise HTTPException(status_code=422, detail="Rows were found but none could be imported")
+
+            return StatementImportResponse(
+                imported_count=len(imported),
+                skipped_count=skipped_count,
+                failed_count=failed_count,
+                transactions=imported,
+                notes=notes[:5],
+            )
+        except HTTPException:
+            raise
+        except Exception as error:
+            logging.exception("Statement upload failed for user %s: %s", user_id, error)
+            raise HTTPException(status_code=422, detail="Unable to process this statement file safely")
 
     @router.post("/transactions/{transaction_id}/similar-preview", response_model=TransactionSimilarityResponse)
     async def preview_similar_transactions(transaction_id: str, request: TransactionSimilarityRequest):
