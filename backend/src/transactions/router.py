@@ -161,6 +161,25 @@ def _rows_to_candidates(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]
                 description = str(normalized[key]).strip()
                 break
 
+        ref_id = None
+        for key in (
+            "ref",
+            "referenceno",
+            "reference",
+            "referencenumber",
+            "utr",
+            "rrn",
+            "txn",
+            "txnid",
+            "transactionid",
+            "transactionreference",
+        ):
+            if key in normalized and str(normalized[key]).strip():
+                ref_id = _extract_ref_id(str(normalized[key])) or str(normalized[key]).strip().upper()
+                break
+        if not ref_id and description:
+            ref_id = _extract_ref_id(description)
+
         debit_amount = None
         for key in ("debit", "withdrawal", "withdraw", "debitamount", "dr"):
             if key in normalized and _looks_like_amount(str(normalized[key])):
@@ -209,6 +228,7 @@ def _rows_to_candidates(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]
                 "description": description[:220],
                 "date": parsed_date,
                 "transaction_type": transaction_type,
+                "ref_id": ref_id,
             }
         )
 
@@ -247,6 +267,7 @@ def _extract_line_candidates(text: str) -> List[Dict[str, Any]]:
                 "description": (match.group("description") or "Imported from statement").strip()[:220],
                 "date": parsed_date,
                 "transaction_type": transaction_type,
+                "ref_id": _extract_ref_id(line),
             }
         )
     return candidates
@@ -279,6 +300,7 @@ async def _extract_candidates_from_text_with_ai(text: str) -> List[Dict[str, Any
                     "description": description,
                     "date": transaction_datetime if isinstance(transaction_datetime, datetime) else datetime.utcnow(),
                     "transaction_type": normalize_transaction_type(transaction_type),
+                    "ref_id": ai_fields.get("reference_id") or _extract_ref_id(line),
                 }
             )
         except Exception:
@@ -522,16 +544,26 @@ def create_transactions_router(db_provider) -> APIRouter:
                         transaction_date = _to_statement_datetime(transaction_date) or datetime.utcnow()
                     raw_type = str(candidate.get("transaction_type", "debit")).strip().lower()
                     transaction_type = normalize_transaction_type(raw_type) if raw_type else infer_transaction_type(description)
+                    ref_id = str(candidate.get("ref_id") or "").strip().upper() or _extract_ref_id(description)
 
-                    existing = await db.transactions.find_one(
-                        {
-                            "user_id": user_id,
-                            "source": "statement_upload",
-                            "amount": amount,
-                            "description": description,
-                            "date": transaction_date,
-                        }
-                    )
+                    existing = None
+                    if ref_id:
+                        existing = await db.transactions.find_one(
+                            {
+                                "user_id": user_id,
+                                "ref_id": ref_id,
+                            }
+                        )
+                    if not existing:
+                        existing = await db.transactions.find_one(
+                            {
+                                "user_id": user_id,
+                                "source": "statement_upload",
+                                "amount": amount,
+                                "description": description,
+                                "date": transaction_date,
+                            }
+                        )
                     if existing:
                         skipped_count += 1
                         continue
@@ -564,6 +596,7 @@ def create_transactions_router(db_provider) -> APIRouter:
                         bank_name=_extract_bank_name(description),
                         account_mask=_extract_account_mask(description),
                         upi_id=upi_id,
+                        ref_id=ref_id,
                     )
                     await db.transactions.insert_one(trans_obj.dict())
                     imported.append(trans_obj)

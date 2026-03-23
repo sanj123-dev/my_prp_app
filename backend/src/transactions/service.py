@@ -571,5 +571,6 @@ async def _init_transaction_learning_infra() -> None:
         await db.transactions.create_index([("user_id", 1), ("merchant_key", 1), ("date", -1)])
         await db.transactions.create_index([("user_id", 1), ("upi_id", 1), ("date", -1)])
         await db.transactions.create_index([("user_id", 1), ("category", 1), ("date", -1)])
+        await db.transactions.create_index([("user_id", 1), ("ref_id", 1)], sparse=True)
     except Exception as error:
         logging.warning("Unable to initialize transaction learning indexes: %s", error)

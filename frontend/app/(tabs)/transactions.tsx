@@ -66,6 +66,8 @@ const wait = (ms: number) =>
     setTimeout(resolve, ms);
   });
 
+const clampPercent = (value: number) => Math.max(0, Math.min(100, value));
+
 interface Transaction {
   id: string;
   amount: number;
@@ -119,6 +121,7 @@ export default function Transactions() {
   const [processing, setProcessing] = useState(false);
   const [statementProcessing, setStatementProcessing] = useState(false);
   const [statementStatus, setStatementStatus] = useState('');
+  const [statementProgressPct, setStatementProgressPct] = useState(0);
   const [smsText, setSmsText] = useState('');
   const [smsProcessing, setSmsProcessing] = useState(false);
   const [activeTab, setActiveTab] = useState<'transactions' | 'analytics'>(
@@ -469,7 +472,7 @@ export default function Transactions() {
       }
       const selected = await DocumentPicker.getDocumentAsync({
         copyToCacheDirectory: true,
-        multiple: false,
+        multiple: true,
         type: [
           'application/pdf',
           'text/csv',
@@ -483,52 +486,82 @@ export default function Transactions() {
         return;
       }
 
-      const asset = selected.assets[0];
-      if (!asset.uri || !asset.name) {
-        Alert.alert('Error', 'Invalid file selected.');
-        return;
-      }
-
       setStatementProcessing(true);
-      setStatementStatus('Reading file...');
+      setStatementProgressPct(0);
 
-      const mimeType = asset.mimeType || '';
-      const isImage = mimeType.startsWith('image/');
-      const ocrText = isImage ? await detectImageOcrText(asset.uri) : '';
+      const totalFiles = selected.assets.length;
+      const allImported: Transaction[] = [];
+      const allNotes: string[] = [];
+      let importedCount = 0;
+      let skippedCount = 0;
+      let failedCount = 0;
 
-      const formData = new FormData();
-      formData.append('user_id', userId);
-      if (ocrText.trim()) {
-        formData.append('extracted_text', ocrText.trim());
-      }
-      formData.append('file', {
-        uri: asset.uri,
-        name: asset.name,
-        type: asset.mimeType || 'application/octet-stream',
-      } as any);
-
-      setStatementStatus('Importing transactions...');
-      const response = await axios.post<StatementImportResponse>(
-        `${EXPO_PUBLIC_BACKEND_URL}/api/transactions/statements/upload`,
-        formData,
-        {
-          headers: { 'Content-Type': 'multipart/form-data' },
+      for (let index = 0; index < totalFiles; index += 1) {
+        const asset = selected.assets[index];
+        if (!asset?.uri || !asset?.name) {
+          failedCount += 1;
+          continue;
         }
-      );
 
-      const imported = response.data.transactions || [];
-      mergeTransactions(imported);
+        setStatementStatus(`Processing statement ${index + 1}/${totalFiles}: ${asset.name}`);
+
+        const mimeType = asset.mimeType || '';
+        const isImage = mimeType.startsWith('image/');
+        const ocrText = isImage ? await detectImageOcrText(asset.uri) : '';
+
+        const formData = new FormData();
+        formData.append('user_id', userId);
+        if (ocrText.trim()) {
+          formData.append('extracted_text', ocrText.trim());
+        }
+        formData.append('file', {
+          uri: asset.uri,
+          name: asset.name,
+          type: asset.mimeType || 'application/octet-stream',
+        } as any);
+
+        try {
+          const response = await axios.post<StatementImportResponse>(
+            `${EXPO_PUBLIC_BACKEND_URL}/api/transactions/statements/upload`,
+            formData,
+            {
+              headers: { 'Content-Type': 'multipart/form-data' },
+              onUploadProgress: (progressEvent) => {
+                const filePct =
+                  progressEvent.total && progressEvent.total > 0
+                    ? (progressEvent.loaded / progressEvent.total) * 100
+                    : 0;
+                const overallPct = ((index + clampPercent(filePct) / 100) / totalFiles) * 100;
+                setStatementProgressPct(clampPercent(overallPct));
+              },
+            }
+          );
+
+          importedCount += Number(response.data.imported_count || 0);
+          skippedCount += Number(response.data.skipped_count || 0);
+          failedCount += Number(response.data.failed_count || 0);
+          allImported.push(...(response.data.transactions || []));
+          allNotes.push(...(response.data.notes || []));
+          setStatementProgressPct(clampPercent(((index + 1) / totalFiles) * 100));
+        } catch (fileError) {
+          failedCount += 1;
+          console.error(`Error importing statement file: ${asset.name}`, getAxiosErrorDetails(fileError));
+        }
+      }
+
+      mergeTransactions(allImported);
       setShowAddModal(false);
-      const noteText = (response.data.notes || []).slice(0, 2).join('\n');
+      const noteText = Array.from(new Set(allNotes)).slice(0, 2).join('\n');
       Alert.alert(
-        'Statement Imported',
-        `Added ${response.data.imported_count} transaction(s). Skipped ${response.data.skipped_count}, failed ${response.data.failed_count}.${noteText ? `\n\n${noteText}` : ''}`
+        'Statements Processed',
+        `Added ${importedCount} transaction(s). Skipped ${skippedCount}, failed ${failedCount}.${noteText ? `\n\n${noteText}` : ''}`
       );
     } catch (error) {
       console.error('Error importing statement:', getAxiosErrorDetails(error));
-      Alert.alert('Error', 'Failed to import statement file.');
+      Alert.alert('Error', 'Failed to import statements.');
     } finally {
       setStatementStatus('');
+      setStatementProgressPct(0);
       setStatementProcessing(false);
     }
   };
@@ -1037,12 +1070,28 @@ export default function Transactions() {
               {statementProcessing ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.addButtonText}>Upload Statement (PDF/Excel/Image)</Text>
+                <Text style={styles.addButtonText}>Upload Statements (PDF/Excel/Image)</Text>
               )}
             </TouchableOpacity>
 
             {statementStatus ? (
               <Text style={styles.statementStatusText}>{statementStatus}</Text>
+            ) : null}
+
+            {statementProcessing ? (
+              <View style={styles.statementProgressRow}>
+                <View style={styles.statementProgressTrack}>
+                  <View
+                    style={[
+                      styles.statementProgressFill,
+                      { width: `${Math.max(2, Math.round(statementProgressPct))}%` },
+                    ]}
+                  />
+                </View>
+                <Text style={styles.statementProgressText}>
+                  {Math.round(statementProgressPct)}%
+                </Text>
+              </View>
             ) : null}
           </View>
         </KeyboardAvoidingView>
@@ -1226,6 +1275,31 @@ const styles = StyleSheet.create({
     color: '#9fb4ff',
     fontSize: 12,
     marginTop: 10,
+  },
+  statementProgressRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  statementProgressTrack: {
+    flex: 1,
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: '#23304d',
+    overflow: 'hidden',
+  },
+  statementProgressFill: {
+    height: '100%',
+    backgroundColor: '#3b82f6',
+    borderRadius: 999,
+  },
+  statementProgressText: {
+    color: '#dce8ff',
+    fontSize: 12,
+    width: 42,
+    textAlign: 'right',
+    fontWeight: '700',
   },
   fabAddButton: {
     position: 'absolute',
