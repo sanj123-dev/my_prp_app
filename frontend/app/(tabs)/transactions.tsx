@@ -545,7 +545,15 @@ export default function Transactions() {
           setStatementProgressPct(clampPercent(((index + 1) / totalFiles) * 100));
         } catch (fileError) {
           failedCount += 1;
-          console.error(`Error importing statement file: ${asset.name}`, getAxiosErrorDetails(fileError));
+          const details = getAxiosErrorDetails(fileError);
+          const reason =
+            details.status === 422
+              ? details.response?.detail || 'No transactions could be extracted from this statement.'
+              : details.message || 'Import failed.';
+          allNotes.push(`${asset.name}: ${reason}`);
+          if (details.status !== 422) {
+            console.error(`Error importing statement file: ${asset.name}`, details);
+          }
         }
       }
 

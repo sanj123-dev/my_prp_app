@@ -437,6 +437,88 @@ Return:
         return {}
 
 
+async def _extract_statement_fields_with_ai(text: str) -> List[Dict[str, Any]]:
+    payload = (text or "").strip()
+    if not payload:
+        return []
+
+    prompt = f"""
+You are extracting financial transactions from statement text.
+Return STRICT JSON only in this shape:
+{{
+  "transactions": [
+    {{
+      "date": "string|null",
+      "description": "string",
+      "amount": number,
+      "transaction_type": "credit|debit|self_transfer|null",
+      "reference_id": "string|null"
+    }}
+  ]
+}}
+
+Rules:
+- Include only real transaction rows.
+- Keep amount positive.
+- Keep description concise.
+- Use null if a field is missing.
+- If uncertain, skip that row.
+
+Statement text:
+{payload[:24000]}
+"""
+    try:
+        llm = _require_llm()
+        response = await llm(
+            "You extract structured financial transactions from bank statements. Return strict JSON only.",
+            prompt,
+            0.0,
+        )
+        cleaned = response.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(cleaned)
+        rows = parsed.get("transactions") if isinstance(parsed, dict) else []
+        if not isinstance(rows, list):
+            return []
+
+        normalized_rows: List[Dict[str, Any]] = []
+        for item in rows[:300]:
+            if not isinstance(item, dict):
+                continue
+
+            amount_raw = item.get("amount")
+            normalized_amount = None
+            if amount_raw is not None:
+                amount_text = str(amount_raw).replace(",", "").strip()
+                if amount_text:
+                    try:
+                        normalized_amount = abs(float(amount_text))
+                    except Exception:
+                        normalized_amount = None
+            if normalized_amount is None or normalized_amount <= 0:
+                continue
+
+            description = str(item.get("description", "")).strip()
+            if not description:
+                continue
+
+            raw_type = str(item.get("transaction_type", "")).strip().lower()
+            normalized_type = normalize_transaction_type(raw_type) if raw_type else None
+
+            normalized_rows.append(
+                {
+                    "date": (str(item.get("date", "")).strip() or None),
+                    "description": description[:220],
+                    "amount": normalized_amount,
+                    "transaction_type": normalized_type,
+                    "reference_id": (str(item.get("reference_id", "")).strip().upper() or None),
+                }
+            )
+        return normalized_rows
+    except Exception as error:
+        logging.warning("Statement field extraction via AI failed: %s", error)
+        return []
+
+
 async def _learned_category_for_transaction(
     user_id: str,
     merchant_key: Optional[str],

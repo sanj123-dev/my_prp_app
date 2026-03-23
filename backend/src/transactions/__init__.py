@@ -7,6 +7,7 @@ from .service import (
     _extract_merchant_key,
     _extract_merchant_name,
     _extract_ref_id,
+    _extract_statement_fields_with_ai,
     _extract_sms_fields_with_ai,
     _extract_upi_id,
     _init_bank_reference_data,

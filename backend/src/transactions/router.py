@@ -30,6 +30,7 @@ from .service import (
     _extract_merchant_key,
     _extract_merchant_name,
     _extract_ref_id,
+    _extract_statement_fields_with_ai,
     _extract_sms_fields_with_ai,
     _extract_upi_id,
     _is_transaction_sms,
@@ -89,6 +90,12 @@ def _to_statement_datetime(value: Any) -> Optional[datetime]:
         "%d/%m/%Y",
         "%d-%m-%y",
         "%d/%m/%y",
+        "%d-%b-%Y",
+        "%d-%b-%y",
+        "%d %b %y",
+        "%d%b%Y",
+        "%d%b%y",
+        "%d%b-%y",
         "%Y-%m-%d",
         "%Y/%m/%d",
         "%d %b %Y",
@@ -106,6 +113,16 @@ def _to_statement_datetime(value: Any) -> Optional[datetime]:
 
 def _normalize_column_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (value or "").strip().lower())
+
+
+def _line_has_date_and_amount(line: str) -> bool:
+    date_like = re.search(
+        r"\b(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s*[A-Za-z]{3,9}\s*-?\s*\d{2,4}|\d{1,2}[A-Za-z]{3,9}-?\d{2,4})\b",
+        line,
+        flags=re.IGNORECASE,
+    )
+    amount_like = re.search(r"\b-?\d[\d,]{1,}(?:\.\d{1,2})?\b", line)
+    return bool(date_like and amount_like)
 
 
 def _extract_rows_from_excel_or_csv(
@@ -140,6 +157,42 @@ def _extract_text_from_pdf(raw_bytes: bytes) -> str:
         page_text = page.extract_text() or ""
         if page_text.strip():
             chunks.append(page_text)
+    return "\n".join(chunks).strip()
+
+
+def _extract_ocr_text_from_pdf_images(raw_bytes: bytes) -> str:
+    """
+    Best-effort OCR for scanned PDFs by reading embedded page images.
+    This is optional and silently falls back if OCR dependencies are unavailable.
+    """
+    try:
+        from PIL import Image  # type: ignore
+        import pytesseract  # type: ignore
+        from pypdf import PdfReader  # type: ignore
+    except Exception:
+        return ""
+
+    chunks: List[str] = []
+    try:
+        reader = PdfReader(BytesIO(raw_bytes))
+        for page in reader.pages:
+            try:
+                images = list(getattr(page, "images", []) or [])
+            except Exception:
+                images = []
+            for image_file in images:
+                try:
+                    data = getattr(image_file, "data", None)
+                    if not data:
+                        continue
+                    image = Image.open(BytesIO(data))
+                    ocr_text = pytesseract.image_to_string(image) or ""
+                    if ocr_text.strip():
+                        chunks.append(ocr_text)
+                except Exception:
+                    continue
+    except Exception:
+        return ""
     return "\n".join(chunks).strip()
 
 
@@ -241,30 +294,47 @@ def _extract_line_candidates(text: str) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     if not text.strip():
         return candidates
-    date_pattern = r"(?P<date>\d{1,2}[-/]\d{1,2}[-/]\d{2,4})"
-    amount_pattern = r"(?P<amount>-?[0-9][0-9,]*(?:\.[0-9]{1,2})?)"
-    crdr_pattern = r"(?P<crdr>cr|dr|credit|debit)?"
-    pattern = re.compile(
-        rf"{date_pattern}\s+(?P<description>.+?)\s+{amount_pattern}\s*{crdr_pattern}\s*$",
+    date_regex = re.compile(
+        r"(?P<date>\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{1,2}\s*[A-Za-z]{3,9}\s*-?\s*\d{2,4}|\d{1,2}[A-Za-z]{3,9}-?\d{2,4})",
         flags=re.IGNORECASE,
     )
+    amount_regex = re.compile(r"-?\d[\d,]{1,}(?:\.\d{1,2})?")
     for raw_line in text.splitlines():
         line = re.sub(r"\s+", " ", raw_line).strip()
         if len(line) < 8:
             continue
-        match = pattern.search(line)
-        if not match:
+        date_match = date_regex.search(line)
+        if not date_match:
             continue
-        amount = _to_amount(match.group("amount"))
+
+        amount_matches = amount_regex.findall(line)
+        if not amount_matches:
+            continue
+        amount = _to_amount(amount_matches[-1])
         if amount is None or amount <= 0:
             continue
-        parsed_date = _to_statement_datetime(match.group("date")) or datetime.utcnow()
-        crdr = (match.group("crdr") or "").strip().lower()
-        transaction_type = "credit" if crdr in {"cr", "credit"} else "debit"
+
+        parsed_date = _to_statement_datetime(date_match.group("date")) or datetime.utcnow()
+        lowered = line.lower()
+        if re.search(r"\b(cr|credit|credited)\b", lowered):
+            transaction_type = "credit"
+        elif re.search(r"\b(dr|debit|debited)\b", lowered):
+            transaction_type = "debit"
+        else:
+            transaction_type = "debit"
+
+        description = line
+        description = description.replace(date_match.group("date"), " ").strip()
+        description = re.sub(r"\b-?\d[\d,]{1,}(?:\.\d{1,2})?\b", " ", description)
+        description = re.sub(r"\b(?:cr|dr|credit|debit)\b", " ", description, flags=re.IGNORECASE)
+        description = re.sub(r"\s+", " ", description).strip(" -:,")
+        if not description:
+            description = "Imported from statement"
+
         candidates.append(
             {
                 "amount": amount,
-                "description": (match.group("description") or "Imported from statement").strip()[:220],
+                "description": description[:220],
                 "date": parsed_date,
                 "transaction_type": transaction_type,
                 "ref_id": _extract_ref_id(line),
@@ -279,7 +349,7 @@ async def _extract_candidates_from_text_with_ai(text: str) -> List[Dict[str, Any
         return candidates
     amount_hint_regex = re.compile(r"(?:rs\.?|inr|₹|\$)\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?", re.IGNORECASE)
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
-    candidate_lines = [line for line in lines if amount_hint_regex.search(line)]
+    candidate_lines = [line for line in lines if amount_hint_regex.search(line) or _line_has_date_and_amount(line)]
     for line in candidate_lines[:80]:
         try:
             ai_fields = await _extract_sms_fields_with_ai(line)
@@ -305,6 +375,35 @@ async def _extract_candidates_from_text_with_ai(text: str) -> List[Dict[str, Any
             )
         except Exception:
             continue
+    return candidates
+
+
+async def _extract_statement_candidates_via_chatbot(text: str) -> List[Dict[str, Any]]:
+    rows = await _extract_statement_fields_with_ai(text)
+    if not rows:
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    for row in rows:
+        amount = _to_amount(row.get("amount"))
+        if amount is None or amount <= 0:
+            continue
+        description = str(row.get("description", "")).strip()[:220]
+        if not description:
+            continue
+        parsed_date = _to_statement_datetime(row.get("date")) or datetime.utcnow()
+        raw_type = str(row.get("transaction_type") or "").strip().lower()
+        transaction_type = normalize_transaction_type(raw_type) if raw_type else infer_transaction_type(description)
+        ref_id = str(row.get("reference_id") or "").strip().upper() or _extract_ref_id(description)
+        candidates.append(
+            {
+                "amount": amount,
+                "description": description,
+                "date": parsed_date,
+                "transaction_type": transaction_type,
+                "ref_id": ref_id,
+            }
+        )
     return candidates
 
 
@@ -494,14 +593,21 @@ def create_transactions_router(db_provider) -> APIRouter:
                 notes.extend(row_notes)
             elif suffix == "pdf" or "pdf" in content_type:
                 raw_text = _extract_text_from_pdf(raw_bytes)
-                line_candidates = _extract_line_candidates(raw_text)
+                ocr_text = _extract_ocr_text_from_pdf_images(raw_bytes)
+                statement_text = "\n".join([part for part in [raw_text, ocr_text] if part.strip()]).strip()
+
+                line_candidates = _extract_line_candidates(statement_text)
                 if line_candidates:
                     candidates.extend(line_candidates)
                 else:
-                    ai_candidates = await _extract_candidates_from_text_with_ai(raw_text)
-                    candidates.extend(ai_candidates)
-                    if not ai_candidates:
-                        notes.append("PDF text was read but transaction rows could not be identified.")
+                    kv_candidates = await _extract_statement_candidates_via_chatbot(statement_text)
+                    if kv_candidates:
+                        candidates.extend(kv_candidates)
+                    else:
+                        ai_candidates = await _extract_candidates_from_text_with_ai(statement_text)
+                        candidates.extend(ai_candidates)
+                        if not ai_candidates:
+                            notes.append("PDF parsed with OCR+AI but transactions could not be identified.")
             elif content_type.startswith("image/") or suffix in {"jpg", "jpeg", "png", "webp"}:
                 text_from_image = (extracted_text or "").strip()
                 if not text_from_image:
