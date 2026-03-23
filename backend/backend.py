@@ -27,6 +27,7 @@ from openai import AsyncOpenAI
 from src.goals import create_goal_router, init_goal_module
 from src.assistant import create_assistant_router, init_assistant_module
 from src.assistant.service import AssistantService
+from src.investments import create_investments_router, init_investments_module
 from src.transactions import (
     _init_bank_reference_data,
     _init_transaction_learning_infra,
@@ -1815,6 +1816,7 @@ app.include_router(api_router)
 app.include_router(create_transactions_router(lambda: db), prefix="/api")
 app.include_router(create_goal_router(lambda: db), prefix="/api")
 app.include_router(create_assistant_router(lambda: db), prefix="/api")
+app.include_router(create_investments_router(lambda: db), prefix="/api")
 
 cors_origins = _parse_cors_origins()
 app.add_middleware(
@@ -1847,6 +1849,10 @@ async def startup_tasks():
         await init_assistant_module(db)
     except Exception as error:
         logging.exception("Assistant module init failed at startup: %s", error)
+    try:
+        await init_investments_module(db)
+    except Exception as error:
+        logging.exception("Investments module init failed at startup: %s", error)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
